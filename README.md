@@ -30,6 +30,8 @@ Agent 开始执行修复任务前，会在任务目录生成 `manifest.json`，�
 
 使用模型时，可以从 `report.json` 的 `model_calls` 找到 `artifacts/model/` 下的记录。`purpose` 区分本地初始化、探索代码和生成补丁，`status` 区分成功、初始化失败、请求失败和补丁格式无效。每条记录包含开始时间、耗时、模型返回的 Token 用量及异常类型。进程在模型步骤中被终止时，可以在任务目录下找到状态为 `running` 的记录。
 
+模型请求读取、搜索或查看 Git diff 时，`report.json` 的 `tool_events` 指向 `artifacts/tools/` 下的记录。每条记录包含请求参数、执行状态、耗时和工具返回给模型的文本，`model_call_id` 对应触发它的模型记录。工具本身的行数和输出长度限制仍然生效。匹配已配置模型 API 密钥的文本会被遮盖，结果中可能包含仓库源码。
+
 每次 pytest 执行的完整终端输出保存在任务目录的 `artifacts/pytest/<run_id>/stdout.log` 与 `stderr.log`。pytest 写出逐用例报告时，同目录还有 `pytest.json`，其中包含用例各阶段的状态、耗时和失败详情。在 `report.json` 中，从 `reference.target`、`reference.regression` 或某个 `validations` 条目的测试结果读取 `artifacts`，就能找到对应文件。路径相对于 `report.json` 所在目录。测试超时后也可查看已经写出的日志。
 
 ### 暂停和记忆

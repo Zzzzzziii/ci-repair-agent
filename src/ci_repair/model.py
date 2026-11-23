@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from itertools import islice
+import os
 from pathlib import Path
 import subprocess
 from time import monotonic
@@ -10,8 +11,8 @@ from langchain.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 
-from ci_repair.artifacts import record_model_call
-from ci_repair.schemas import ModelCallPurpose, ModelCallRecord
+from ci_repair.artifacts import record_model_call, record_tool_event
+from ci_repair.schemas import ModelCallPurpose, ModelCallRecord, ToolEvent
 from ci_repair.workspace import git, within
 
 
@@ -104,11 +105,72 @@ def run_model_step(request, purpose: ModelCallPurpose, task: dict, task_director
             record["error_type"] = type(parsing_error).__name__ if parsing_error else None
             raise ModelStepError("Model did not return a valid patch proposal")
         record["status"] = "succeeded"
-        return result
+        return result, record["call_id"]
     finally:
         if task_directory is not None and record["status"] != "running":
             record["duration_ms"] = round((monotonic() - started) * 1000)
             record_model_call(task_directory, record)
+
+
+def redact_tool_value(value, secrets: tuple[str, ...]):
+    if not secrets:
+        return value
+    if isinstance(value, str):
+        for secret in secrets:
+            value = value.replace(secret, "[REDACTED]")
+    elif isinstance(value, dict):
+        return {redact_tool_value(key, secrets): redact_tool_value(item, secrets) for key, item in value.items()}
+    elif isinstance(value, list):
+        return [redact_tool_value(item, secrets) for item in value]
+    return value
+
+
+def execute_repository_tool(call, item, *, budget_available: bool, model_call_id: str,
+                            task_id: str, task_directory: Path | None, secrets: tuple[str, ...]):
+    event: ToolEvent = {
+        "schema_version": 1,
+        "event_id": uuid4().hex,
+        "task_id": task_id,
+        "model_call_id": model_call_id,
+        "tool_call_id": redact_tool_value(call["id"], secrets),
+        "tool": redact_tool_value(call["name"], secrets),
+        "args": redact_tool_value(call["args"], secrets),
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "duration_ms": None,
+        "result": None,
+        "error_type": None,
+    }
+    if task_directory is not None:
+        record_tool_event(task_directory, event)
+    started = monotonic()
+    result = None
+    try:
+        if not budget_available:
+            event["status"] = "budget_exhausted"
+            result = ToolMessage(content="Tool budget exhausted", tool_call_id=call["id"])
+        elif item is None:
+            event["status"] = "unknown_tool"
+            result = ToolMessage(content="Unknown tool", tool_call_id=call["id"])
+        else:
+            result = item.invoke(call)
+            event["status"] = "failed" if result.status == "error" else "succeeded"
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        event["status"] = "failed"
+        event["error_type"] = type(error).__name__
+        result = ToolMessage(content=str(error), tool_call_id=call["id"])
+    except Exception as error:
+        event["status"] = "failed"
+        event["error_type"] = type(error).__name__
+        raise RuntimeError(f"Repository tool failed ({event['error_type']})") from None
+    finally:
+        if event["status"] != "running":
+            event["duration_ms"] = round((monotonic() - started) * 1000)
+            if result is not None:
+                event["result"] = redact_tool_value(str(result.content), secrets)
+            if task_directory is not None:
+                record_tool_event(task_directory, event)
+    return result, event
 
 
 def propose(model_name: str, tree: Path, task: dict, failure: str, history: list[dict],
@@ -123,8 +185,13 @@ def propose(model_name: str, tree: Path, task: dict, failure: str, history: list
         model = init_chat_model(model_name, **model_options)
         return model, model.bind_tools(tools)
 
-    model, explorer = run_model_step(initialize, "initialize", task, task_directory)
+    (model, explorer), _ = run_model_step(initialize, "initialize", task, task_directory)
     by_name = {item.name: item for item in tools}
+    task_id = task.get("id", "")
+    secrets = tuple(sorted({
+        value for name in ("DEEPSEEK_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "API_KEY")
+        if (value := os.environ.get(name))
+    }, key=len, reverse=True))
     messages = [
         SystemMessage(content=(
             "Diagnose a Python business-logic regression. Use read-only tools to inspect the "
@@ -142,29 +209,24 @@ def propose(model_name: str, tree: Path, task: dict, failure: str, history: list
     rounds = 2 if task["strategy"] == "sequential" else 5
     tool_budget = 6 if task["strategy"] == "sequential" else 12
     for _ in range(rounds):
-        reply = run_model_step(lambda: explorer.invoke(messages), "explore", task, task_directory)
+        reply, model_call_id = run_model_step(lambda: explorer.invoke(messages), "explore", task, task_directory)
         usage.append(reply.usage_metadata or {})
         messages.append(reply)
         if not reply.tool_calls:
             break
         for call in reply.tool_calls:
-            if len(trace) >= tool_budget:
-                messages.append(ToolMessage(content="Tool budget exhausted", tool_call_id=call["id"]))
-                continue
-            item = by_name.get(call["name"])
-            try:
-                result = item.invoke(call) if item else ToolMessage(
-                    content="Unknown tool", tool_call_id=call["id"]
-                )
-            except (ValueError, OSError, subprocess.TimeoutExpired) as error:
-                result = ToolMessage(content=str(error), tool_call_id=call["id"])
+            result, event = execute_repository_tool(
+                call, by_name.get(call["name"]), budget_available=len(trace) < tool_budget,
+                model_call_id=model_call_id, task_id=task_id, task_directory=task_directory, secrets=secrets,
+            )
             messages.append(result)
-            trace.append({"tool": call["name"], "args": call["args"], "result": str(result.content)[:1000]})
+            if event["status"] != "budget_exhausted":
+                trace.append({"tool": event["tool"], "args": event["args"], "result": (event["result"] or "")[:1000]})
         if len(trace) >= tool_budget:
             break
     limit = 1 if task["strategy"] == "sequential" else 2
     messages.append(HumanMessage(content=f"Return up to {limit} candidate unified diffs with evidence."))
-    response = run_model_step(
+    response, _ = run_model_step(
         lambda: model.with_structured_output(Proposal, include_raw=True).invoke(messages),
         "propose", task, task_directory,
     )

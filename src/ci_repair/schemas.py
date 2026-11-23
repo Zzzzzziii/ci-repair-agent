@@ -27,3 +27,18 @@ class ModelCallRecord(TypedDict):
     duration_ms: int | None
     usage: dict[str, int] | None
     error_type: str | None
+
+
+class ToolEvent(TypedDict):
+    schema_version: int
+    event_id: str
+    task_id: str
+    model_call_id: str
+    tool_call_id: str
+    tool: str
+    args: dict[str, object]
+    status: Literal["running", "succeeded", "failed", "unknown_tool", "budget_exhausted"]
+    started_at: str
+    duration_ms: int | None
+    result: str | None
+    error_type: str | None
