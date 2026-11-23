@@ -6,11 +6,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
-from ci_repair.schemas import ModelCallRecord, RunManifest
+from ci_repair.schemas import ModelCallRecord, RunManifest, ToolEvent
 
 
 MANIFEST_FILENAME = "manifest.json"
 MODEL_ARTIFACTS = Path("artifacts") / "model"
+TOOL_ARTIFACTS = Path("artifacts") / "tools"
 
 
 def atomic_write(path: Path, content: bytes) -> None:
@@ -55,18 +56,25 @@ def record_model_call(directory: Path, record: ModelCallRecord) -> None:
     write_json(destination, record)
 
 
+def record_tool_event(directory: Path, event: ToolEvent) -> None:
+    destination = directory / TOOL_ARTIFACTS / f"{event['event_id']}.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    write_json(destination, event)
+
+
 def publish(directory: Path, state: dict, next_nodes: tuple, error: str | None = None) -> str:
     status = "interrupted" if error else "paused" if next_nodes else state["status"]
     report = {**state, "status": status, "next": list(next_nodes)}
     if (directory / MANIFEST_FILENAME).is_file():
         report["manifest"] = MANIFEST_FILENAME
-    model_calls = sorted(
-        path.relative_to(directory).as_posix()
-        for path in (directory / MODEL_ARTIFACTS).glob("*.json")
-        if path.is_file()
-    )
-    if model_calls:
-        report["model_calls"] = model_calls
+    for key, category in (("model_calls", MODEL_ARTIFACTS), ("tool_events", TOOL_ARTIFACTS)):
+        paths = sorted(
+            path.relative_to(directory).as_posix()
+            for path in (directory / category).glob("*.json")
+            if path.is_file()
+        )
+        if paths:
+            report[key] = paths
     if error:
         report["reason"] = error
     if status == "accepted":

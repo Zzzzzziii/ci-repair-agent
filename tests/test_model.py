@@ -8,7 +8,12 @@ from ci_repair.workspace import commit_id, git
 
 def test_model_uses_real_repository_tool_before_proposal(tmp_path, monkeypatch):
     git(tmp_path, "init", "--quiet")
-    (tmp_path / "shipping.py").write_text("def fee(total):\n    return 12\n", encoding="utf-8")
+    model_key = "fixture-deepseek-key"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", model_key)
+    (tmp_path / "shipping.py").write_text(
+        "def fee(total):\n    return 12\n" + ("# " + "x" * 450 + "\n") * 3
+        + f"# end of captured source {model_key}\n", encoding="utf-8",
+    )
     git(tmp_path, "add", ".")
     git(tmp_path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
         "commit", "--quiet", "-m", "Baseline")
@@ -39,7 +44,7 @@ def test_model_uses_real_repository_tool_before_proposal(tmp_path, monkeypatch):
             ]
             assert any(call["purpose"] == "explore" and call["status"] == "running" for call in ongoing)
             return AIMessage(content="", tool_calls=[
-                {"id": "read-1", "name": "read_file", "args": {"path": "shipping.py", "end_line": 2}}
+                {"id": "read-1", "name": "read_file", "args": {"path": "shipping.py", "end_line": 6}}
             ])
 
     def init_model(name, **options):
@@ -64,3 +69,44 @@ def test_model_uses_real_repository_tool_before_proposal(tmp_path, monkeypatch):
     assert all(call["duration_ms"] >= 0 for call in calls)
     assert all(call["usage"] is None for call in calls if call["purpose"] == "explore")
     assert next(call for call in calls if call["purpose"] == "propose")["usage"] == usage
+    trace = proposal["tool_trace"][0]
+    assert len(trace["result"]) == 1000
+    assert "end of captured source" not in trace["result"]
+    event_path, = (task_directory / "artifacts" / "tools").glob("*.json")
+    event_text = event_path.read_text(encoding="utf-8")
+    assert model_key not in event_text
+    event = json.loads(event_text)
+    assert event["tool_call_id"] == "read-1"
+    assert event["event_id"] == event_path.stem
+    assert event["task_id"] == "test-task"
+    assert event["status"] == "succeeded"
+    assert event["args"] == {"path": "shipping.py", "end_line": 6}
+    assert event["result"].rstrip("\n").endswith("end of captured source [REDACTED]")
+    assert next(call for call in calls if call["call_id"] == event["model_call_id"])["purpose"] == "explore"
+
+
+def test_repository_tool_records_invalid_and_skipped_calls(tmp_path):
+    git(tmp_path, "init", "--quiet")
+    read_file = model.repository_tools(tmp_path, "unused")[0]
+    model_key = "fixture-key-in-tool-args"
+    call = {"type": "tool_call", "id": "read-1", "name": "read_file", "args": {"path": model_key}}
+    task_directory = tmp_path / "task"
+
+    for item, budget_available, status in (
+        (read_file, True, "failed"),
+        (None, True, "unknown_tool"),
+        (read_file, False, "budget_exhausted"),
+    ):
+        message, event = model.execute_repository_tool(
+            call, item, budget_available=budget_available, model_call_id="explore-1",
+            task_id="test-task", task_directory=task_directory, secrets=(model_key,),
+        )
+        event_text = (task_directory / "artifacts" / "tools" / f"{event['event_id']}.json").read_text(encoding="utf-8")
+        assert model_key not in event_text
+        assert json.loads(event_text) == event
+        assert event["status"] == status
+        assert event["args"]["path"] == "[REDACTED]"
+        assert event["result"] == message.content
+        if status == "failed":
+            assert event["error_type"] == "ValueError"
+    assert len(list((task_directory / "artifacts" / "tools").glob("*.json"))) == 3

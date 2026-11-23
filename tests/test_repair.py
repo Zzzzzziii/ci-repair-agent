@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import sys
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 import pytest
 
 from ci_repair import model
@@ -193,6 +193,10 @@ def test_interrupted_model_task_links_call_records(tmp_path, monkeypatch, purpos
         def invoke(self, messages):
             if purpose == "explore":
                 raise TimeoutError(placeholder)
+            if purpose == "propose" and not isinstance(messages[-1], ToolMessage):
+                return AIMessage(content="", tool_calls=[{
+                    "id": "read-1", "name": "read_file", "args": {"path": "shipping.py", "end_line": 8},
+                }])
             return AIMessage(content="Ready to propose a fix")
 
         def with_structured_output(self, schema, *, include_raw):
@@ -228,3 +232,11 @@ def test_interrupted_model_task_links_call_records(tmp_path, monkeypatch, purpos
     assert failed["task_id"] == report["task"]["id"]
     assert failed["status"] == status
     assert failed["error_type"] == error_type
+    if purpose == "propose":
+        tool_event_path, = report["tool_events"]
+        event = json.loads((report_path.parent / tool_event_path).read_text(encoding="utf-8"))
+        assert event["task_id"] == report["task"]["id"]
+        assert event["status"] == "succeeded"
+        assert event["tool"] == "read_file"
+        assert "FREE_SHIPPING_THRESHOLD" in event["result"]
+        assert next(call for call in calls if call["call_id"] == event["model_call_id"])["purpose"] == "explore"
