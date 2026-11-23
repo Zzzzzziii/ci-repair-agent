@@ -1,9 +1,12 @@
 from pathlib import Path
 import subprocess
+from time import monotonic
 from typing import TypedDict
+from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
 
+from ci_repair.artifacts import append_workflow_event
 from ci_repair.memory import RepairMemory
 from ci_repair.model import propose
 from ci_repair.pytest_adapter import PytestAdapter
@@ -27,6 +30,34 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
     scratch = storage / "scratch"
     scratch.mkdir(exist_ok=True)
     memory = RepairMemory(storage / "repairs.sqlite")
+
+    def record_node(name, action):
+        def run(state: RepairState):
+            task_id = state["task"]["id"]
+            directory = storage / "runs" / task_id
+            details = {"node": name, "step_id": uuid4().hex}
+            if name == "validate":
+                details["candidate"] = len(state.get("validations", [])) + 1
+            append_workflow_event(directory, task_id, "node_started", **details)
+            started = monotonic()
+            try:
+                updates = action(state)
+            except Exception as error:
+                append_workflow_event(
+                    directory, task_id, "node_failed", **details,
+                    duration_ms=round((monotonic() - started) * 1000), error_type=type(error).__name__,
+                )
+                raise
+            outcome = updates.get("status", state["status"])
+            if name == "validate":
+                outcome = updates["validations"][-1]["status"]
+            append_workflow_event(
+                directory, task_id, "node_finished", **details,
+                duration_ms=round((monotonic() - started) * 1000), outcome=outcome,
+            )
+            return updates
+
+        return run
 
     def adapter(task):
         return PytestAdapter(
@@ -123,10 +154,10 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
         return "finish"
 
     graph = StateGraph(RepairState)
-    graph.add_node("reproduce", reproduce)
-    graph.add_node("generate", generate)
-    graph.add_node("validate", validate)
-    graph.add_node("finish", finish)
+    graph.add_node("reproduce", record_node("reproduce", reproduce))
+    graph.add_node("generate", record_node("generate", generate))
+    graph.add_node("validate", record_node("validate", validate))
+    graph.add_node("finish", record_node("finish", finish))
     graph.add_edge(START, "reproduce")
     graph.add_conditional_edges("reproduce", after_baseline, ["finish", "validate", "generate"])
     graph.add_edge("generate", "validate")

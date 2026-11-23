@@ -42,3 +42,17 @@ class ToolEvent(TypedDict):
     duration_ms: int | None
     result: str | None
     error_type: str | None
+
+
+WorkflowEventType = Literal[
+    "task_started", "task_resumed", "task_paused", "task_interrupted", "task_finished",
+    "node_started", "node_finished", "node_failed",
+]
+
+
+class WorkflowEvent(TypedDict):
+    schema_version: int
+    task_id: str
+    timestamp: str
+    event: WorkflowEventType
+    details: dict[str, object]

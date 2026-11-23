@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from ci_repair.artifacts import publish, record_run_inputs
+from ci_repair.artifacts import append_workflow_event, publish, record_run_inputs
 from ci_repair.pytest_adapter import failing_nodes, normalized_node
 from ci_repair.workflow import build_workflow
 from ci_repair.workspace import commit_id, repository_key, repository_path, within
@@ -141,13 +141,26 @@ def main(argv=None) -> int:
                 if initial is not None:
                     record_run_inputs(directory, initial["task"], input_log)
                 error = None
-                if initial is not None or snapshot.next:
+                should_run = initial is not None or bool(snapshot.next)
+                if should_run:
+                    append_workflow_event(
+                        directory, task_id, "task_started" if initial is not None else "task_resumed",
+                    )
                     try:
                         graph.invoke(initial, config, durability="sync")
                     except Exception as failure:
                         error = f"{type(failure).__name__}: {str(failure)[:1000]}"
                 snapshot = graph.get_state(config)
-                status = publish(directory, snapshot.values or initial, snapshot.next, error)
+                state = snapshot.values or initial
+                if error:
+                    status, ending = "interrupted", "task_interrupted"
+                elif snapshot.next:
+                    status, ending = "paused", "task_paused"
+                else:
+                    status, ending = state["status"], "task_finished"
+                if should_run:
+                    append_workflow_event(directory, task_id, ending, status=status, next=list(snapshot.next))
+                publish(directory, state, snapshot.next, status=status, error=error)
             return {"accepted": 0, "paused": 0, "rejected": 1}.get(status, 2)
     except (ValueError, OSError, sqlite3.Error, subprocess.TimeoutExpired) as error:
         print(f"ci-repair: {error}", file=sys.stderr)

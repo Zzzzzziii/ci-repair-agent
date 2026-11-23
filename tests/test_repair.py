@@ -42,6 +42,10 @@ def cli(storage: Path, *args: str):
     )
 
 
+def read_timeline(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
 def test_reports_real_execution_states(tmp_path, monkeypatch):
     sample = tmp_path / "test_status.py"
     sample.write_text(
@@ -110,6 +114,17 @@ def test_resume_after_rejecting_regression(tmp_path):
     artifacts = storage / "runs" / task
     report = json.loads((artifacts / "report.json").read_text(encoding="utf-8"))
     assert report["status"] == "paused", report
+    timeline_path = artifacts / report["events"]
+    paused_events = read_timeline(timeline_path)
+    assert [event["event"] for event in paused_events] == [
+        "task_started", "node_started", "node_finished", "node_started", "node_finished", "task_paused",
+    ]
+    assert paused_events[-1]["details"] == {"status": "paused", "next": ["validate"]}
+    first_validation = paused_events[-2]["details"]
+    assert first_validation["node"] == "validate"
+    assert first_validation["outcome"] == "rejected"
+    assert first_validation["candidate"] == 1
+    assert first_validation["step_id"] == paused_events[-3]["details"]["step_id"]
     manifest_path = artifacts / report["manifest"]
     manifest_bytes = manifest_path.read_bytes()
     manifest = json.loads(manifest_bytes)
@@ -133,6 +148,18 @@ def test_resume_after_rejecting_regression(tmp_path):
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     report = json.loads((artifacts / "report.json").read_text(encoding="utf-8"))
     assert report["status"] == "accepted"
+    assert report["events"] == timeline_path.name
+    events = read_timeline(timeline_path)
+    assert events[:len(paused_events)] == paused_events
+    assert [event["event"] for event in events[len(paused_events):]] == [
+        "task_resumed", "node_started", "node_finished", "node_started", "node_finished", "task_finished",
+    ]
+    second_validation = events[len(paused_events) + 2]["details"]
+    assert second_validation["outcome"] == "accepted"
+    assert second_validation["candidate"] == 2
+    assert second_validation["step_id"] != first_validation["step_id"]
+    assert events[-1]["details"] == {"status": "accepted", "next": []}
+    assert all(event["task_id"] == task for event in events)
     assert report["manifest"] == manifest_path.name
     assert manifest_path.read_bytes() == manifest_bytes
     assert saved_log.read_bytes() == log_bytes
@@ -225,6 +252,17 @@ def test_interrupted_model_task_links_call_records(tmp_path, monkeypatch, purpos
     assert report["status"] == "interrupted"
     assert report["next"] == ["generate"]
     assert placeholder not in report_text
+    timeline_path = report_path.parent / report["events"]
+    assert placeholder not in timeline_path.read_text(encoding="utf-8")
+    events = read_timeline(timeline_path)
+    started, failed, interrupted = events[-3:]
+    assert started["event"] == "node_started"
+    assert failed["event"] == "node_failed"
+    assert failed["details"]["node"] == "generate"
+    assert failed["details"]["step_id"] == started["details"]["step_id"]
+    assert failed["details"]["error_type"] == "ModelStepError"
+    assert interrupted["event"] == "task_interrupted"
+    assert interrupted["details"] == {"status": "interrupted", "next": ["generate"]}
     call_texts = [(report_path.parent / path).read_text(encoding="utf-8") for path in report["model_calls"]]
     assert all(placeholder not in text for text in call_texts)
     calls = [json.loads(text) for text in call_texts]
