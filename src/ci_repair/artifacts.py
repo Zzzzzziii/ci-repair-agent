@@ -6,10 +6,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
-from ci_repair.schemas import ModelCallRecord, RunManifest, ToolEvent
+from ci_repair.schemas import ModelCallRecord, RunManifest, ToolEvent, WorkflowEvent, WorkflowEventType
 
 
 MANIFEST_FILENAME = "manifest.json"
+EVENTS_FILENAME = "events.jsonl"
 MODEL_ARTIFACTS = Path("artifacts") / "model"
 TOOL_ARTIFACTS = Path("artifacts") / "tools"
 
@@ -62,11 +63,31 @@ def record_tool_event(directory: Path, event: ToolEvent) -> None:
     write_json(destination, event)
 
 
-def publish(directory: Path, state: dict, next_nodes: tuple, error: str | None = None) -> str:
-    status = "interrupted" if error else "paused" if next_nodes else state["status"]
+def append_workflow_event(directory: Path, task_id: str, kind: WorkflowEventType, **details: object) -> None:
+    event: WorkflowEvent = {
+        "schema_version": 1,
+        "task_id": task_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event": kind,
+        "details": details,
+    }
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / EVENTS_FILENAME
+    try:
+        previous = path.read_bytes()
+    except FileNotFoundError:
+        previous = b""
+    # The CLI serializes writers per task. Replacing the short timeline keeps every JSON line complete.
+    line = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+    atomic_write(path, previous + line)
+
+
+def publish(directory: Path, state: dict, next_nodes: tuple, *, status: str, error: str | None = None) -> None:
     report = {**state, "status": status, "next": list(next_nodes)}
     if (directory / MANIFEST_FILENAME).is_file():
         report["manifest"] = MANIFEST_FILENAME
+    if (directory / EVENTS_FILENAME).is_file():
+        report["events"] = EVENTS_FILENAME
     for key, category in (("model_calls", MODEL_ARTIFACTS), ("tool_events", TOOL_ARTIFACTS)):
         paths = sorted(
             path.relative_to(directory).as_posix()
@@ -82,7 +103,6 @@ def publish(directory: Path, state: dict, next_nodes: tuple, error: str | None =
         atomic_write(directory / "fix.diff", accepted["diff"].encode("utf-8"))
     write_json(directory / "report.json", report)
     print(f"{status}: {directory / 'report.json'}")
-    return status
 
 
 @contextmanager
