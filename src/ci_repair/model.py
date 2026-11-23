@@ -61,7 +61,11 @@ def repository_tools(tree: Path, commit: str):
 
 def propose(model_name: str, tree: Path, task: dict, failure: str, history: list[dict],
             feedback: list[dict]) -> dict:
-    model = init_chat_model(model_name, temperature=0, max_retries=1, timeout=60)
+    model_options = {"temperature": 0, "max_retries": 1, "timeout": 60}
+    if model_name.startswith("deepseek:"):
+        # Structured patch output uses forced tool selection, which needs thinking disabled.
+        model_options["extra_body"] = {"thinking": {"type": "disabled"}}
+    model = init_chat_model(model_name, **model_options)
     tools = repository_tools(tree, task["commit"])
     by_name = {item.name: item for item in tools}
     messages = [

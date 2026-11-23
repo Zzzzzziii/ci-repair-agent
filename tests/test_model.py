@@ -33,8 +33,13 @@ def test_model_uses_real_repository_tool_before_proposal(tmp_path, monkeypatch):
                 {"id": "read-1", "name": "read_file", "args": {"path": "shipping.py", "end_line": 2}}
             ])
 
-    monkeypatch.setattr(model, "init_chat_model", lambda *args, **kwargs: ScriptedModel())
-    proposal = model.propose("test:model", tmp_path, {
+    def init_model(name, **options):
+        assert name == "deepseek:deepseek-flash"
+        assert options["extra_body"] == {"thinking": {"type": "disabled"}}
+        return ScriptedModel()
+
+    monkeypatch.setattr(model, "init_chat_model", init_model)
+    proposal = model.propose("deepseek:deepseek-flash", tmp_path, {
         "commit": commit_id(tmp_path, "HEAD"), "targets": ["test_shipping.py::test_fee"],
         "strategy": "batch",
     }, "AssertionError", [], [])

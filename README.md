@@ -11,7 +11,7 @@ uv sync
 uv run ci-repair --help
 ```
 
-给模型配置 `GOOGLE_API_KEY`，并将 `CI_REPAIR_MODEL` 设为有权使用的 `google_genai:<模型ID>`。LangChain 负责绑定读取、搜索和 Git diff 工具。目标仓库的依赖应提前装好，必要时通过 `--python` 指定其虚拟环境。
+在本地环境中设置 `DEEPSEEK_API_KEY`，将 `CI_REPAIR_MODEL` 设为 `deepseek:deepseek-flash`。LangChain 负责绑定读取、搜索和 Git diff 工具。目标仓库的依赖应提前装好，必要时通过 `--python` 指定其虚拟环境。
 
 ```powershell
 uv run ci-repair fix --repo D:\checkout-service --log .\ci-error.log --commit a1b2c3d
@@ -47,7 +47,7 @@ uv run python evals/run.py --output .ci-repair/eval-live --model $env:CI_REPAIR_
 
 自动化测试覆盖逐用例结果、工具调用、补丁验收、两份独立仓库和进程退出后恢复。评测脚本准备 20 个合成案例，覆盖 5 类缺陷。离线模式使用已知补丁检查评测流程。模型模式比较批量候选、顺序重试和历史记忆，并用模型未见过的测试验收输出。结果写入 `results.json` 和 `summary.json`。
 
-GitHub Actions 的 [演示工作流](.github/workflows/ci-repair-demo.yml) 会在结算示例路径发生推送或手动启动时运行测试，失败后调用相同的 CLI。仓库需配置 `CI_REPAIR_MODEL` 变量及 `GOOGLE_API_KEY` Secret。补丁和报告可从 Actions 产物下载。
+GitHub Actions 的 [演示工作流](.github/workflows/ci-repair-demo.yml) 会在结算示例路径发生推送或手动启动时运行测试，失败后调用相同的 CLI。将 DeepSeek 密钥保存为仓库 Secret `API_KEY`。默认模型是 `deepseek:deepseek-flash`。如果仓库已有 `CI_REPAIR_MODEL` 变量，将它更新为这个值或另一个支持工具调用的 DeepSeek 模型。补丁和报告可从 Actions 产物下载。
 
 各阶段的设计原因和验收目标见 [开发计划](DEVELOPMENT_PLAN.md)。
 
