@@ -93,8 +93,10 @@ def test_resume_after_rejecting_regression(tmp_path):
     create_patch(repo, "shipping.py", original.replace("subtotal >", "subtotal >="), right)
     (repo / "shipping.py").write_text(original + "\n# local edit\n", encoding="utf-8")
     log = tmp_path / "ci.log"
-    log.write_text("FAILED test_shipping.py::test_standard_shipping_at_threshold_is_free - AssertionError\n",
-                   encoding="utf-8")
+    commit = git(repo, "rev-parse", "HEAD").strip()
+    target_node = "test_shipping.py::test_standard_shipping_at_threshold_is_free"
+    log_bytes = f"\ufeffGITHUB_SHA={commit}\r\nFAILED {target_node} - AssertionError\r\n".encode("utf-8")
+    log.write_bytes(log_bytes)
 
     result = cli(storage, "fix", "--repo", str(repo), "--log", str(log),
                  "--patch", str(wrong), "--patch", str(right), "--pause-after-candidate")
@@ -103,6 +105,16 @@ def test_resume_after_rejecting_regression(tmp_path):
     artifacts = storage / "runs" / task
     report = json.loads((artifacts / "report.json").read_text(encoding="utf-8"))
     assert report["status"] == "paused", report
+    manifest_path = artifacts / report["manifest"]
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    assert manifest["schema_version"] == 1
+    assert manifest["task_id"] == task
+    assert manifest["commit"] == commit
+    assert manifest["commit_source"] == "CI log"
+    assert manifest["targets"] == [target_node]
+    saved_log = artifacts / manifest["input_log"]
+    assert saved_log.read_bytes() == log_bytes
     failed_node = "test_shipping.py::test_remote_shipping_at_threshold_is_charged"
     assert report["validations"][0]["regressions"] == [failed_node]
     rejected_evidence = report["validations"][0]["regression"]["artifacts"]
@@ -111,10 +123,14 @@ def test_resume_after_rejecting_regression(tmp_path):
     assert failed_node in (artifacts / rejected_evidence["stdout"]).read_text(encoding="utf-8")
     assert not (artifacts / "fix.diff").exists()
 
+    log.unlink()
     resumed = cli(storage, "resume", task)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     report = json.loads((artifacts / "report.json").read_text(encoding="utf-8"))
     assert report["status"] == "accepted"
+    assert report["manifest"] == manifest_path.name
+    assert manifest_path.read_bytes() == manifest_bytes
+    assert saved_log.read_bytes() == log_bytes
     assert [candidate["status"] for candidate in report["validations"]] == ["rejected", "accepted"]
     assert report["validations"][0]["regression"]["artifacts"] == rejected_evidence
     accepted_evidence = report["validations"][1]["regression"]["artifacts"]
@@ -147,5 +163,8 @@ def test_rejects_test_edit_and_accepts_cross_file_fix(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     report_path = next((storage / "runs").glob("*/report.json"))
     report = json.loads(report_path.read_text(encoding="utf-8"))
+    manifest = json.loads((report_path.parent / report["manifest"]).read_text(encoding="utf-8"))
+    assert manifest["input_log"] is None
+    assert not (report_path.parent / "artifacts" / "input").exists()
     assert "protected" in report["validations"][0]["reason"]
     assert report["validations"][1]["status"] == "accepted"
