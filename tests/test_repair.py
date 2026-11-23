@@ -4,6 +4,11 @@ import shutil
 import subprocess
 import sys
 
+from langchain_core.messages import AIMessage
+import pytest
+
+from ci_repair import model
+from ci_repair.cli import main
 from ci_repair.pytest_adapter import PytestAdapter, failing_nodes
 from ci_repair.workspace import git
 
@@ -168,3 +173,58 @@ def test_rejects_test_edit_and_accepts_cross_file_fix(tmp_path):
     assert not (report_path.parent / "artifacts" / "input").exists()
     assert "protected" in report["validations"][0]["reason"]
     assert report["validations"][1]["status"] == "accepted"
+
+
+@pytest.mark.parametrize(("purpose", "status", "error_type"), [
+    ("initialize", "setup_failed", "ValueError"),
+    ("explore", "request_failed", "TimeoutError"),
+    ("propose", "invalid_output", "ValueError"),
+])
+def test_interrupted_model_task_links_call_records(tmp_path, monkeypatch, purpose, status, error_type):
+    repo = tmp_path / "shipping"
+    make_repository(repo, PROJECT / "examples/shipping")
+    storage = tmp_path / "state"
+    placeholder = "placeholder-for-private-error-detail"
+
+    class ScriptedModel:
+        def bind_tools(self, tools):
+            return self
+
+        def invoke(self, messages):
+            if purpose == "explore":
+                raise TimeoutError(placeholder)
+            return AIMessage(content="Ready to propose a fix")
+
+        def with_structured_output(self, schema, *, include_raw):
+            class MalformedProposal:
+                def invoke(self, messages):
+                    return {"parsed": None, "raw": AIMessage(content=placeholder),
+                            "parsing_error": ValueError(placeholder)}
+
+            return MalformedProposal()
+
+    def init_model(name, **options):
+        if purpose == "initialize":
+            raise ValueError(placeholder)
+        return ScriptedModel()
+
+    monkeypatch.setattr(model, "init_chat_model", init_model)
+    assert main([
+        "--state-dir", str(storage), "fix", "--repo", str(repo),
+        "--test", "test_shipping.py::test_standard_shipping_at_threshold_is_free",
+        "--model", "deepseek:deepseek-flash",
+    ]) == 2
+
+    report_path = next((storage / "runs").glob("*/report.json"))
+    report_text = report_path.read_text(encoding="utf-8")
+    report = json.loads(report_text)
+    assert report["status"] == "interrupted"
+    assert report["next"] == ["generate"]
+    assert placeholder not in report_text
+    call_texts = [(report_path.parent / path).read_text(encoding="utf-8") for path in report["model_calls"]]
+    assert all(placeholder not in text for text in call_texts)
+    calls = [json.loads(text) for text in call_texts]
+    failed = next(call for call in calls if call["purpose"] == purpose)
+    assert failed["task_id"] == report["task"]["id"]
+    assert failed["status"] == status
+    assert failed["error_type"] == error_type
