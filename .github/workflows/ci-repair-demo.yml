@@ -1,0 +1,43 @@
+name: Repair a failed checkout test
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - examples/checkout/**
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e . "pytest>=8,<10"
+      - name: Record the failing test
+        id: baseline
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q examples/checkout 2>&1 | tee ci-error.log
+          echo "test_exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+      - name: Repair and verify
+        if: steps.baseline.outputs.test_exit != '0'
+        env:
+          CI_REPAIR_MODEL: ${{ vars.CI_REPAIR_MODEL }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          ci-repair --state-dir .ci-repair fix --repo . --commit "$GITHUB_SHA" \
+            --log ci-error.log --regression examples/checkout
+      - name: Upload CI evidence and repair artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repair-results
+          path: |
+            ci-error.log
+            .ci-repair/runs/

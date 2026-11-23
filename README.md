@@ -1,0 +1,83 @@
+# CI 单测失败修复 Agent
+
+把一个 Git 仓库和 pytest CI 日志交给 CLI。Agent 在指定提交上复现失败，调用工具读取和搜索源码，生成候选 diff，再运行原用例和回归测试。报告列出每个候选的验收证据。通过时另存可审查的 `fix.diff`。
+
+## 安装和使用
+
+需要 Git、Python 3.12 或以上版本和 pytest。使用 uv 安装本项目：
+
+```powershell
+uv sync
+uv run ci-repair --help
+```
+
+给模型配置 `GOOGLE_API_KEY`，并将 `CI_REPAIR_MODEL` 设为有权使用的 `google_genai:<模型ID>`。LangChain 负责绑定读取、搜索和 Git diff 工具。目标仓库的依赖应提前装好，必要时通过 `--python` 指定其虚拟环境。
+
+```powershell
+uv run ci-repair fix --repo D:\checkout-service --log .\ci-error.log --commit a1b2c3d
+uv run ci-repair fix --repo D:\checkout-service --test 'tests/test_checkout.py::test_coupon' --python 'D:\checkout-service\.venv\Scripts\python.exe'
+```
+
+- `--log -` 从标准输入读取日志。识别 pytest 的 `FAILED path::test_name` 摘要，也接受 GitHub Actions 单时间戳前缀。日志缺少准确用例时传 `--test`，可重复。
+- `--commit` 指定失败提交。缺省时读取明确的 `GITHUB_SHA=<SHA>` 或 `commit: <SHA>` 日志行，最后回退到本地 `HEAD`。报告记录版本来源。
+- `--cwd` 指定相对仓库的测试根目录。测试选择器也相对于这个目录。默认回归范围是该目录按项目配置发现的测试套件，可用可重复的 `--regression` 缩小范围。
+- `--strategy batch` 一次生成最多两个候选，默认启用。`--strategy sequential` 先验证一个候选，失败后把测试反馈交给模型再试一次。
+- `--patch` 可重复传入一或两份现成 diff，走相同验收流程，无需模型密钥。
+
+输出中的任务 ID 对应 `~/.ci-repair/runs/<task_id>/report.json`。要换位置，在子命令前传 `--state-dir`。验收保留基线中已通过的用例，并单独记录基线已有的其他失败。首版支持修改已有的 Python 业务源码。补丁应用在临时 Git worktree 中，用户的当前工作目录不受影响。测试以目标解释器在本机执行，请用于自己的仓库。
+
+### 暂停和记忆
+
+加 `--pause-after-candidate` 可在第一个候选验证后主动暂停。也可以在进程退出后查看已保存进度并恢复：
+
+```powershell
+uv run ci-repair status <task_id>
+uv run ci-repair resume <task_id>
+```
+
+LangGraph 把任务状态存进 SQLite。完成验证的候选会被记住，恢复后从待执行的节点继续。验收通过的修复经验可以在新任务中按同一仓库、用例名和失败特征检索，帮助模型定位。使用 `--no-memory` 可关闭本次任务的历史检索和写入。
+
+### 验证和评测
+
+```powershell
+uv run pytest -q
+uv run python evals/run.py --output .ci-repair/eval-offline --limit 5
+uv run python evals/run.py --output .ci-repair/eval-live --model $env:CI_REPAIR_MODEL --compare-memory
+```
+
+自动化测试覆盖逐用例结果、工具调用、补丁验收、两份独立仓库和进程退出后恢复。评测脚本准备 20 个合成案例，覆盖 5 类缺陷。离线模式使用已知补丁检查评测流程。模型模式比较批量候选、顺序重试和历史记忆，并用模型未见过的测试验收输出。结果写入 `results.json` 和 `summary.json`。
+
+GitHub Actions 的 [演示工作流](.github/workflows/ci-repair-demo.yml) 会在结算示例路径发生推送或手动启动时运行测试，失败后调用相同的 CLI。仓库需配置 `CI_REPAIR_MODEL` 变量及 `GOOGLE_API_KEY` Secret。补丁和报告可从 Actions 产物下载。
+
+各阶段的设计原因和验收目标见 [开发计划](DEVELOPMENT_PLAN.md)。
+
+真实仓库接入、代码 RAG、反馈修复和记忆的后续开发，按 [进阶实施计划与实现讲解](IMPLEMENTATION_ROADMAP.md) 推进。其中包含 2026 年 11 月 18 日的代码审查结果、已复现的环境问题和逐阶段完成条件。
+
+实际编码时使用 [分阶段文件与实现清单](STAGE_IMPLEMENTATION_PLAN.md)，逐项完成对应文件、接口与验收案例。
+
+## 最小运费案例
+
+示例规则是普通地区满 200 元免运费，偏远地区固定收取 25 元。`examples/shipping/shipping.py` 故意将普通地区的条件写成 `> 200`，供后续修复流程使用。
+
+在项目根目录用 PowerShell 创建环境：
+
+```powershell
+$env:UV_CACHE_DIR = Join-Path $PWD '.uv-cache'
+$env:UV_PYTHON_INSTALL_DIR = Join-Path $PWD '.uv-python'
+uv python install 3.12 --no-bin
+uv sync --managed-python
+```
+
+运行整个示例测试：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q examples/shipping
+```
+
+预期有 1 条失败、3 条通过。失败用例是 `test_standard_shipping_at_threshold_is_free`，实收 12 元，预期 0 元。其他用例覆盖门槛上下两侧以及偏远地区。
+
+只复跑失败用例：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q examples/shipping/test_shipping.py::test_standard_shipping_at_threshold_is_free
+```
