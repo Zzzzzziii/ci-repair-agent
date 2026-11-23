@@ -63,7 +63,10 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
             for candidate, result in zip(candidates, state.get("validations", []))
         ]
         with worktree(Path(task["repository"]), task["commit"], scratch) as tree:
-            proposal = propose(task["model"], tree, task, output, history, feedback)
+            proposal = propose(
+                task["model"], tree, task, output, history, feedback,
+                task_directory=storage / "runs" / task["id"],
+            )
         return {
             "candidates": [*candidates, *proposal["candidates"]],
             "tool_trace": [*state.get("tool_trace", []), *proposal["tool_trace"]],

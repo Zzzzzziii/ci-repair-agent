@@ -1,12 +1,17 @@
+from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
 import subprocess
+from time import monotonic
+from uuid import uuid4
 
 from langchain.chat_models import init_chat_model
 from langchain.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 
+from ci_repair.artifacts import record_model_call
+from ci_repair.schemas import ModelCallPurpose, ModelCallRecord
 from ci_repair.workspace import git, within
 
 
@@ -18,6 +23,10 @@ class Candidate(BaseModel):
 
 class Proposal(BaseModel):
     candidates: list[Candidate] = Field(min_length=1, max_length=2)
+
+
+class ModelStepError(RuntimeError):
+    pass
 
 
 def repository_tools(tree: Path, commit: str):
@@ -59,14 +68,62 @@ def repository_tools(tree: Path, commit: str):
     return [read_file, search_code, git_diff]
 
 
+def run_model_step(request, purpose: ModelCallPurpose, task: dict, task_directory: Path | None):
+    record: ModelCallRecord = {
+        "schema_version": 1,
+        "call_id": uuid4().hex,
+        "task_id": task.get("id", ""),
+        "purpose": purpose,
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "duration_ms": None,
+        "usage": None,
+        "error_type": None,
+    }
+    if task_directory is not None:
+        record_model_call(task_directory, record)
+    started = monotonic()
+    try:
+        result = request()
+    except Exception as error:
+        record["status"] = "setup_failed" if purpose == "initialize" else "request_failed"
+        record["error_type"] = type(error).__name__
+        raise ModelStepError(f"Model {purpose} failed ({record['error_type']})") from None
+    else:
+        if purpose != "initialize":
+            reply = result.get("raw") if purpose == "propose" else result
+            usage = getattr(reply, "usage_metadata", None)
+            if usage is not None:
+                record["usage"] = {
+                    name: usage[name] for name in ("input_tokens", "output_tokens", "total_tokens")
+                    if name in usage
+                }
+        if purpose == "propose" and result.get("parsed") is None:
+            record["status"] = "invalid_output"
+            parsing_error = result.get("parsing_error")
+            record["error_type"] = type(parsing_error).__name__ if parsing_error else None
+            raise ModelStepError("Model did not return a valid patch proposal")
+        record["status"] = "succeeded"
+        return result
+    finally:
+        if task_directory is not None and record["status"] != "running":
+            record["duration_ms"] = round((monotonic() - started) * 1000)
+            record_model_call(task_directory, record)
+
+
 def propose(model_name: str, tree: Path, task: dict, failure: str, history: list[dict],
-            feedback: list[dict]) -> dict:
+            feedback: list[dict], *, task_directory: Path | None = None) -> dict:
     model_options = {"temperature": 0, "max_retries": 1, "timeout": 60}
     if model_name.startswith("deepseek:"):
         # Structured patch output uses forced tool selection, which needs thinking disabled.
         model_options["extra_body"] = {"thinking": {"type": "disabled"}}
-    model = init_chat_model(model_name, **model_options)
     tools = repository_tools(tree, task["commit"])
+
+    def initialize():
+        model = init_chat_model(model_name, **model_options)
+        return model, model.bind_tools(tools)
+
+    model, explorer = run_model_step(initialize, "initialize", task, task_directory)
     by_name = {item.name: item for item in tools}
     messages = [
         SystemMessage(content=(
@@ -80,13 +137,12 @@ def propose(model_name: str, tree: Path, task: dict, failure: str, history: list
             f"Rejected attempts in this task: {feedback}"
         )),
     ]
-    explorer = model.bind_tools(tools)
     trace = []
     usage = []
     rounds = 2 if task["strategy"] == "sequential" else 5
     tool_budget = 6 if task["strategy"] == "sequential" else 12
     for _ in range(rounds):
-        reply = explorer.invoke(messages)
+        reply = run_model_step(lambda: explorer.invoke(messages), "explore", task, task_directory)
         usage.append(reply.usage_metadata or {})
         messages.append(reply)
         if not reply.tool_calls:
@@ -108,10 +164,11 @@ def propose(model_name: str, tree: Path, task: dict, failure: str, history: list
             break
     limit = 1 if task["strategy"] == "sequential" else 2
     messages.append(HumanMessage(content=f"Return up to {limit} candidate unified diffs with evidence."))
-    response = model.with_structured_output(Proposal, include_raw=True).invoke(messages)
+    response = run_model_step(
+        lambda: model.with_structured_output(Proposal, include_raw=True).invoke(messages),
+        "propose", task, task_directory,
+    )
     proposal = response["parsed"]
-    if proposal is None:
-        raise ValueError("Model did not return a valid patch proposal")
     usage.append(response["raw"].usage_metadata or {})
     return {
         "candidates": [candidate.model_dump() for candidate in proposal.candidates[:limit]],

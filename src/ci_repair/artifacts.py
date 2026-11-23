@@ -6,10 +6,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
-from ci_repair.schemas import RunManifest
+from ci_repair.schemas import ModelCallRecord, RunManifest
 
 
 MANIFEST_FILENAME = "manifest.json"
+MODEL_ARTIFACTS = Path("artifacts") / "model"
 
 
 def atomic_write(path: Path, content: bytes) -> None:
@@ -48,11 +49,24 @@ def record_run_inputs(directory: Path, task: dict, log: bytes | None) -> None:
     write_json(directory / MANIFEST_FILENAME, manifest)
 
 
+def record_model_call(directory: Path, record: ModelCallRecord) -> None:
+    destination = directory / MODEL_ARTIFACTS / f"{record['call_id']}.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    write_json(destination, record)
+
+
 def publish(directory: Path, state: dict, next_nodes: tuple, error: str | None = None) -> str:
     status = "interrupted" if error else "paused" if next_nodes else state["status"]
     report = {**state, "status": status, "next": list(next_nodes)}
     if (directory / MANIFEST_FILENAME).is_file():
         report["manifest"] = MANIFEST_FILENAME
+    model_calls = sorted(
+        path.relative_to(directory).as_posix()
+        for path in (directory / MODEL_ARTIFACTS).glob("*.json")
+        if path.is_file()
+    )
+    if model_calls:
+        report["model_calls"] = model_calls
     if error:
         report["reason"] = error
     if status == "accepted":
