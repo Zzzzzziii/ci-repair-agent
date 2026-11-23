@@ -2,8 +2,9 @@ import json
 from pathlib import Path
 import re
 import subprocess
-from tempfile import TemporaryDirectory
 from time import monotonic
+
+from ci_repair.artifacts import pytest_run_directory
 
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -37,11 +38,21 @@ def test_status(phases: dict) -> str:
     return phases.get("call", {}).get("status", "not_run")
 
 
+def log_tail(path: Path, characters: int = 12000) -> str:
+    with path.open("rb") as stream:
+        size = stream.seek(0, 2)
+        stream.seek(max(0, size - characters * 4))
+        return stream.read().decode("utf-8", errors="replace")[-characters:]
+
+
 class PytestAdapter:
-    def __init__(self, interpreter: Path, scratch: Path, timeout: float):
+    def __init__(
+        self, interpreter: Path, scratch: Path, timeout: float, *, task_directory: Path | None = None
+    ):
         self.interpreter = interpreter
         self.scratch = scratch
         self.timeout = timeout
+        self.task_directory = task_directory
 
     def run(self, directory: Path, selectors: list[str]) -> dict:
         start = monotonic()
@@ -54,18 +65,28 @@ class PytestAdapter:
         }
         worker = Path(__file__).with_name("pytest_reporter.py").resolve()
         try:
-            with TemporaryDirectory(dir=self.scratch) as temporary:
-                report = Path(temporary) / "pytest.json"
-                process = subprocess.run(
-                    [str(self.interpreter), "-B", "-X", "utf8", str(worker), str(report), *selectors],
-                    cwd=directory,
-                    capture_output=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=self.timeout,
-                )
+            with pytest_run_directory(self.scratch, self.task_directory) as run_directory:
+                report = run_directory / "pytest.json"
+                stdout = run_directory / "stdout.log"
+                stderr = run_directory / "stderr.log"
+                try:
+                    with stdout.open("wb") as stdout_file, stderr.open("wb") as stderr_file:
+                        process = subprocess.run(
+                            [str(self.interpreter), "-B", "-X", "utf8", str(worker), str(report), *selectors],
+                            cwd=directory,
+                            stdout=stdout_file,
+                            stderr=stderr_file,
+                            timeout=self.timeout,
+                        )
+                finally:
+                    if self.task_directory is not None:
+                        result["artifacts"] = {
+                            name: path.relative_to(self.task_directory).as_posix()
+                            for name, path in (("stdout", stdout), ("stderr", stderr), ("pytest_report", report))
+                            if path.is_file()
+                        }
                 result["exit_code"] = process.returncode
-                result["output"] = (process.stdout + process.stderr)[-12000:]
+                result["output"] = (log_tail(stdout) + log_tail(stderr))[-12000:]
                 if report.is_file():
                     evidence = json.loads(report.read_text(encoding="utf-8"))
                     result["collection_errors"] = evidence["collection_errors"]

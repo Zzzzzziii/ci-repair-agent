@@ -37,31 +37,41 @@ def cli(storage: Path, *args: str):
     )
 
 
-def test_reports_real_execution_states(tmp_path):
+def test_reports_real_execution_states(tmp_path, monkeypatch):
     sample = tmp_path / "test_status.py"
     sample.write_text(
         "import pytest\n"
-        "def test_pass(): assert True\n"
+        "def test_pass():\n"
+        "    print('LOG_START')\n"
+        "    print('x' * 14000)\n"
         "def test_fail(): assert False\n"
         "@pytest.mark.skip\ndef test_skip(): pass\n"
         "@pytest.mark.xfail\ndef test_expected_failure(): assert False\n",
         encoding="utf-8",
     )
-    adapter = PytestAdapter(Path(sys.executable), tmp_path, 15)
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-s")
+    task_directory = tmp_path / "task"
+    adapter = PytestAdapter(Path(sys.executable), tmp_path, 15, task_directory=task_directory)
     result = adapter.run(tmp_path, [sample.name])
     assert result["status"] == "failed", result
     assert {key.split("::")[1]: value["status"] for key, value in result["tests"].items()} == {
         "test_pass": "passed", "test_fail": "failed", "test_skip": "skipped",
         "test_expected_failure": "xfailed",
     }
+    assert "LOG_START" in (task_directory / result["artifacts"]["stdout"]).read_text(encoding="utf-8")
+    assert "LOG_START" not in result["output"]
+    assert len(result["output"]) == 12000
     assert adapter.run(tmp_path, [sample.name + "::test_missing"])["status"] == "error"
     sample.write_text("import missing_test_dependency\n", encoding="utf-8")
     collection = adapter.run(tmp_path, [sample.name])
     assert collection["status"] == "error"
     assert "missing_test_dependency" in collection["collection_errors"][0]
-    assert PytestAdapter(Path(sys.executable), tmp_path, 0.001).run(
-        tmp_path, [sample.name]
-    )["status"] == "timeout"
+    timed_out = PytestAdapter(
+        Path(sys.executable), tmp_path, 0.001, task_directory=task_directory
+    ).run(tmp_path, [sample.name])
+    assert timed_out["status"] == "timeout"
+    assert (task_directory / timed_out["artifacts"]["stdout"]).is_file()
+    assert (task_directory / timed_out["artifacts"]["stderr"]).is_file()
 
 
 def test_extracts_parameterized_nodes():
@@ -93,9 +103,12 @@ def test_resume_after_rejecting_regression(tmp_path):
     artifacts = storage / "runs" / task
     report = json.loads((artifacts / "report.json").read_text(encoding="utf-8"))
     assert report["status"] == "paused", report
-    assert report["validations"][0]["regressions"] == [
-        "test_shipping.py::test_remote_shipping_at_threshold_is_charged"
-    ]
+    failed_node = "test_shipping.py::test_remote_shipping_at_threshold_is_charged"
+    assert report["validations"][0]["regressions"] == [failed_node]
+    rejected_evidence = report["validations"][0]["regression"]["artifacts"]
+    rejected_report = artifacts / rejected_evidence["pytest_report"]
+    assert json.loads(rejected_report.read_text(encoding="utf-8"))["phases"][failed_node]["call"]["status"] == "failed"
+    assert failed_node in (artifacts / rejected_evidence["stdout"]).read_text(encoding="utf-8")
     assert not (artifacts / "fix.diff").exists()
 
     resumed = cli(storage, "resume", task)
@@ -103,6 +116,11 @@ def test_resume_after_rejecting_regression(tmp_path):
     report = json.loads((artifacts / "report.json").read_text(encoding="utf-8"))
     assert report["status"] == "accepted"
     assert [candidate["status"] for candidate in report["validations"]] == ["rejected", "accepted"]
+    assert report["validations"][0]["regression"]["artifacts"] == rejected_evidence
+    accepted_evidence = report["validations"][1]["regression"]["artifacts"]
+    assert accepted_evidence["pytest_report"] != rejected_evidence["pytest_report"]
+    accepted_report = artifacts / accepted_evidence["pytest_report"]
+    assert json.loads(accepted_report.read_text(encoding="utf-8"))["phases"][failed_node]["call"]["status"] == "passed"
     assert "subtotal >=" in (artifacts / "fix.diff").read_text(encoding="utf-8")
     assert "# local edit" in (repo / "shipping.py").read_text(encoding="utf-8")
     assert git(repo, "worktree", "list").count("\n") == 1

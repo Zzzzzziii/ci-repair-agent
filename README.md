@@ -26,6 +26,8 @@ uv run ci-repair fix --repo D:\checkout-service --test 'tests/test_checkout.py::
 
 输出中的任务 ID 对应 `~/.ci-repair/runs/<task_id>/report.json`。要换位置，在子命令前传 `--state-dir`。验收保留基线中已通过的用例，并单独记录基线已有的其他失败。首版支持修改已有的 Python 业务源码。补丁应用在临时 Git worktree 中，用户的当前工作目录不受影响。测试以目标解释器在本机执行，请用于自己的仓库。
 
+每次 pytest 执行的完整终端输出保存在任务目录的 `artifacts/pytest/<run_id>/stdout.log` 与 `stderr.log`。pytest 写出逐用例报告时，同目录还有 `pytest.json`，其中包含用例各阶段的状态、耗时和失败详情。在 `report.json` 中，从 `reference.target`、`reference.regression` 或某个 `validations` 条目的测试结果读取 `artifacts`，就能找到对应文件。路径相对于 `report.json` 所在目录。测试超时后也可查看已经写出的日志。
+
 ### 暂停和记忆
 
 加 `--pause-after-candidate` 可在第一个候选验证后主动暂停。也可以在进程退出后查看已保存进度并恢复：
