@@ -28,8 +28,8 @@ jobs:
       - name: Repair and verify
         if: steps.baseline.outputs.test_exit != '0'
         env:
-          CI_REPAIR_MODEL: ${{ vars.CI_REPAIR_MODEL }}
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          CI_REPAIR_MODEL: ${{ vars.CI_REPAIR_MODEL || 'deepseek:deepseek-flash' }}
+          DEEPSEEK_API_KEY: ${{ secrets.API_KEY }}
         run: |
           ci-repair --state-dir .ci-repair fix --repo . --commit "$GITHUB_SHA" \
             --log ci-error.log --regression examples/checkout
