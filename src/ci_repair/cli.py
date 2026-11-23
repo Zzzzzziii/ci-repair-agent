@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from ci_repair.artifacts import publish, record_run_inputs
 from ci_repair.pytest_adapter import failing_nodes, normalized_node
 from ci_repair.workflow import build_workflow
 from ci_repair.workspace import commit_id, repository_key, repository_path, within
@@ -41,12 +42,17 @@ def parser() -> argparse.ArgumentParser:
     return command
 
 
-def new_state(args) -> dict:
+def read_ci_log(path: str | None) -> bytes | None:
+    if not path:
+        return None
+    if path == "-":
+        return sys.stdin.read().encode("utf-8", errors="surrogateescape")
+    return Path(path).read_bytes()
+
+
+def new_state(args, log: str) -> dict:
     repository = repository_path(args.repo)
     directory = within(repository, args.cwd).relative_to(repository).as_posix()
-    log = ""
-    if args.log:
-        log = sys.stdin.read() if args.log == "-" else Path(args.log).read_text(encoding="utf-8-sig", errors="replace")
     targets = list(dict.fromkeys(normalized_node(node) for node in (args.test or failing_nodes(log))))
     log_commit = re.search(r"^(?:GITHUB_SHA=|commit:[ \t]*)([0-9a-fA-F]{40})[ \t]*$", log, re.MULTILINE)
     ref = args.commit or (log_commit[1] if log_commit else "HEAD")
@@ -91,34 +97,16 @@ def new_state(args) -> dict:
     }
 
 
-def atomic_write(path: Path, content: str) -> None:
-    temporary = path.with_name(f".{path.name}-{uuid4().hex}")
-    try:
-        temporary.write_text(content, encoding="utf-8", newline="\n")
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def publish(directory: Path, state: dict, next_nodes: tuple, error: str | None = None) -> str:
-    directory.mkdir(parents=True, exist_ok=True)
-    status = "interrupted" if error else "paused" if next_nodes else state["status"]
-    report = {**state, "status": status, "next": list(next_nodes)}
-    if error:
-        report["reason"] = error
-    if status == "accepted":
-        accepted = next(item for item in state["validations"] if item["status"] == "accepted")
-        atomic_write(directory / "fix.diff", accepted["diff"])
-    atomic_write(directory / "report.json", json.dumps(report, ensure_ascii=False, indent=2))
-    print(f"{status}: {directory / 'report.json'}")
-    return status
-
-
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     storage = args.state_dir.resolve()
     try:
-        initial = new_state(args) if args.command == "fix" else None
+        initial = None
+        input_log = None
+        if args.command == "fix":
+            input_log = read_ci_log(args.log)
+            log = (input_log or b"").decode("utf-8-sig", errors="replace")
+            initial = new_state(args, log.replace("\r\n", "\n").replace("\r", "\n"))
         task_id = initial["task"]["id"] if initial else str(args.task_id)
         directory = storage / "runs" / task_id
         database = storage / "checkpoints.sqlite"
@@ -150,6 +138,8 @@ def main(argv=None) -> int:
                     raise
                 snapshot = graph.get_state(config)
                 print(f"Task ID: {task_id}", flush=True)
+                if initial is not None:
+                    record_run_inputs(directory, initial["task"], input_log)
                 error = None
                 if initial is not None or snapshot.next:
                     try:
