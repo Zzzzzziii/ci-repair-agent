@@ -82,6 +82,17 @@ def append_workflow_event(directory: Path, task_id: str, kind: WorkflowEventType
     atomic_write(path, previous + line)
 
 
+def record_candidate_diffs(directory: Path, candidates: list[dict]) -> list[dict]:
+    output = directory / "artifacts" / "candidates"
+    output.mkdir(parents=True, exist_ok=True)
+    records = []
+    for number, candidate in enumerate(candidates, start=1):
+        path = output / f"candidate-{number}.diff"
+        atomic_write(path, candidate["diff"].encode("utf-8"))
+        records.append({**candidate, "candidate": number, "diff_artifact": path.relative_to(directory).as_posix()})
+    return records
+
+
 def publish(directory: Path, state: dict, next_nodes: tuple, *, status: str, error: str | None = None) -> None:
     report = {**state, "status": status, "next": list(next_nodes)}
     if (directory / MANIFEST_FILENAME).is_file():
@@ -96,6 +107,14 @@ def publish(directory: Path, state: dict, next_nodes: tuple, *, status: str, err
         )
         if paths:
             report[key] = paths
+    if candidates := state.get("candidates"):
+        candidate_records = record_candidate_diffs(directory, candidates)
+        report["candidates"] = candidate_records
+        if validations := state.get("validations"):
+            report["validations"] = [
+                {**validation, "candidate_diff": candidate_records[validation["candidate"] - 1]["diff_artifact"]}
+                for validation in validations
+            ]
     if error:
         report["reason"] = error
     if status == "accepted":

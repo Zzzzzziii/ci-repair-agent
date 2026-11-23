@@ -34,6 +34,8 @@ Agent 开始执行修复任务前，会在任务目录生成 `manifest.json`，�
 
 `report.json` 的 `events` 指向同一任务目录里的 `events.jsonl`。按行查看复现失败、生成补丁、候选验收和收尾的开始与结果。验收事件记录候选编号，`step_id` 将同一次节点执行的开始和结束关联起来。暂停和恢复会继续写入同一份时间线，恢复进度由 SQLite 检查点决定。
 
+每个候选补丁单独保存在任务目录的 `artifacts/candidates/candidate-N.diff`。报告里可以从 `candidates` 的 `diff_artifact` 或对应 `validations` 的 `candidate_diff` 打开它。任务暂停时也能查看已记录的候选。通过验收后，`fix.diff` 保存从验收工作区导出的最终改动。
+
 每次 pytest 执行的完整终端输出保存在任务目录的 `artifacts/pytest/<run_id>/stdout.log` 与 `stderr.log`。pytest 写出逐用例报告时，同目录还有 `pytest.json`，其中包含用例各阶段的状态、耗时和失败详情。在 `report.json` 中，从 `reference.target`、`reference.regression` 或某个 `validations` 条目的测试结果读取 `artifacts`，就能找到对应文件。路径相对于 `report.json` 所在目录。测试超时后也可查看已经写出的日志。
 
 ### 暂停和记忆

@@ -7,7 +7,7 @@ import sys
 from langchain_core.messages import AIMessage, ToolMessage
 import pytest
 
-from ci_repair import model
+from ci_repair import model, workflow
 from ci_repair.cli import main
 from ci_repair.pytest_adapter import PytestAdapter, failing_nodes
 from ci_repair.workspace import git
@@ -114,6 +114,11 @@ def test_resume_after_rejecting_regression(tmp_path):
     artifacts = storage / "runs" / task
     report = json.loads((artifacts / "report.json").read_text(encoding="utf-8"))
     assert report["status"] == "paused", report
+    candidate_paths = [item["diff_artifact"] for item in report["candidates"]]
+    original_diffs = [path.read_text(encoding="utf-8-sig").encode("utf-8") for path in (wrong, right)]
+    assert [item["candidate"] for item in report["candidates"]] == [1, 2]
+    assert [item["candidate_diff"] for item in report["validations"]] == candidate_paths[:1]
+    assert [(artifacts / path).read_bytes() for path in candidate_paths] == original_diffs
     timeline_path = artifacts / report["events"]
     paused_events = read_timeline(timeline_path)
     assert [event["event"] for event in paused_events] == [
@@ -144,6 +149,8 @@ def test_resume_after_rejecting_regression(tmp_path):
     assert not (artifacts / "fix.diff").exists()
 
     log.unlink()
+    wrong.unlink()
+    right.unlink()
     resumed = cli(storage, "resume", task)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     report = json.loads((artifacts / "report.json").read_text(encoding="utf-8"))
@@ -164,6 +171,8 @@ def test_resume_after_rejecting_regression(tmp_path):
     assert manifest_path.read_bytes() == manifest_bytes
     assert saved_log.read_bytes() == log_bytes
     assert [candidate["status"] for candidate in report["validations"]] == ["rejected", "accepted"]
+    assert [item["candidate_diff"] for item in report["validations"]] == candidate_paths
+    assert [(artifacts / path).read_bytes() for path in candidate_paths] == original_diffs
     assert report["validations"][0]["regression"]["artifacts"] == rejected_evidence
     accepted_evidence = report["validations"][1]["regression"]["artifacts"]
     assert accepted_evidence["pytest_report"] != rejected_evidence["pytest_report"]
@@ -200,6 +209,36 @@ def test_rejects_test_edit_and_accepts_cross_file_fix(tmp_path):
     assert not (report_path.parent / "artifacts" / "input").exists()
     assert "protected" in report["validations"][0]["reason"]
     assert report["validations"][1]["status"] == "accepted"
+
+
+def test_saves_rejected_model_candidate(tmp_path, monkeypatch):
+    repo = tmp_path / "shipping"
+    make_repository(repo, PROJECT / "examples/shipping")
+    storage = tmp_path / "state"
+    proposed_diff = "Malformed candidate from a scripted proposal\n"
+
+    def propose(*args, **kwargs):
+        return {
+            "candidates": [{"diff": proposed_diff, "hypothesis": "Test proposal", "evidence": []}],
+            "tool_trace": [],
+            "model_usage": [],
+        }
+
+    monkeypatch.setattr(workflow, "propose", propose)
+    assert main([
+        "--state-dir", str(storage), "fix", "--repo", str(repo),
+        "--test", "test_shipping.py::test_standard_shipping_at_threshold_is_free",
+        "--model", "deepseek:deepseek-flash",
+    ]) == 1
+
+    report_path = next((storage / "runs").glob("*/report.json"))
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    candidate, = report["candidates"]
+    validation, = report["validations"]
+    assert report["status"] == validation["status"] == "rejected"
+    assert candidate["diff_artifact"] == validation["candidate_diff"]
+    assert (report_path.parent / candidate["diff_artifact"]).read_bytes() == proposed_diff.encode("utf-8")
+    assert not (report_path.parent / "fix.diff").exists()
 
 
 @pytest.mark.parametrize(("purpose", "status", "error_type"), [
