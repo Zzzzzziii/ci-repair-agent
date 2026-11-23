@@ -29,7 +29,12 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
     memory = RepairMemory(storage / "repairs.sqlite")
 
     def adapter(task):
-        return PytestAdapter(Path(task["python"]), scratch, task["timeout"])
+        return PytestAdapter(
+            Path(task["python"]),
+            scratch,
+            task["timeout"],
+            task_directory=storage / "runs" / task["id"],
+        )
 
     def reproduce(state: RepairState):
         task = state["task"]
