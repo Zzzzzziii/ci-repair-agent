@@ -63,6 +63,9 @@ def test_reports_real_execution_states(tmp_path, monkeypatch):
     adapter = PytestAdapter(Path(sys.executable), tmp_path, 15, task_directory=task_directory)
     result = adapter.run(tmp_path, [sample.name])
     assert result["status"] == "failed", result
+    assert Path(result["command"][0]) == Path(sys.executable)
+    assert result["command"][-1] == sample.name
+    assert Path(result["cwd"]) == tmp_path
     assert {key.split("::")[1]: value["status"] for key, value in result["tests"].items()} == {
         "test_pass": "passed", "test_fail": "failed", "test_skip": "skipped",
         "test_expected_failure": "xfailed",

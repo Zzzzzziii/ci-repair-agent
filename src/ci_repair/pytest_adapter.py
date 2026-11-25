@@ -1,11 +1,11 @@
 import json
 from pathlib import Path
 import re
-import subprocess
 from time import monotonic
 
 from ci_repair.artifacts import pytest_run_directory
 from ci_repair.project import prepare_candidate_environment
+from ci_repair.runner import OUTPUT_LIMIT, run_process
 
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -39,13 +39,6 @@ def test_status(phases: dict) -> str:
     return phases.get("call", {}).get("status", "not_run")
 
 
-def log_tail(path: Path, characters: int = 12000) -> str:
-    with path.open("rb") as stream:
-        size = stream.seek(0, 2)
-        stream.seek(max(0, size - characters * 4))
-        return stream.read().decode("utf-8", errors="replace")[-characters:]
-
-
 class PytestAdapter:
     def __init__(
         self, interpreter: Path, scratch: Path, timeout: float, *, task_directory: Path | None = None,
@@ -65,6 +58,7 @@ class PytestAdapter:
             "tests": {},
             "collection_errors": [],
             "output": "",
+            "cwd": str(directory),
         }
         worker = Path(__file__).with_name("pytest_reporter.py").resolve()
         try:
@@ -73,16 +67,12 @@ class PytestAdapter:
                 report = run_directory / "pytest.json"
                 stdout = run_directory / "stdout.log"
                 stderr = run_directory / "stderr.log"
+                command = [str(self.interpreter), "-B", "-X", "utf8", str(worker), str(report), *selectors]
+                result["command"] = command
                 try:
-                    with stdout.open("wb") as stdout_file, stderr.open("wb") as stderr_file:
-                        process = subprocess.run(
-                            [str(self.interpreter), "-B", "-X", "utf8", str(worker), str(report), *selectors],
-                            cwd=directory,
-                            env=env,
-                            stdout=stdout_file,
-                            stderr=stderr_file,
-                            timeout=self.timeout,
-                        )
+                    process = run_process(
+                        command, cwd=directory, env=env, stdout_path=stdout, stderr_path=stderr, timeout=self.timeout,
+                    )
                 finally:
                     if self.task_directory is not None:
                         result["artifacts"] = {
@@ -90,9 +80,15 @@ class PytestAdapter:
                             for name, path in (("stdout", stdout), ("stderr", stderr), ("pytest_report", report))
                             if path.is_file()
                         }
-                result["exit_code"] = process.returncode
-                result["output"] = (log_tail(stdout) + log_tail(stderr))[-12000:]
-                if report.is_file():
+                result["exit_code"] = process["exit_code"]
+                result["output"] = process["output"]
+                if process["timed_out"]:
+                    result["status"] = "timeout"
+                    notice = f"pytest exceeded {self.timeout:g}s\n"
+                    result["output"] = (notice + process["output"][-(OUTPUT_LIMIT - len(notice)):]).rstrip()
+                    if process["cleanup_error"]:
+                        result["cleanup_error"] = process["cleanup_error"]
+                elif report.is_file():
                     evidence = json.loads(report.read_text(encoding="utf-8"))
                     result["collection_errors"] = evidence["collection_errors"]
                     result["tests"] = {
@@ -104,10 +100,8 @@ class PytestAdapter:
                     )
                     if not has_error:
                         result["status"] = {0: "passed", 1: "failed", 5: "no_tests"}.get(
-                            process.returncode, "error"
+                            process["exit_code"], "error"
                         )
-        except subprocess.TimeoutExpired:
-            result.update(status="timeout", output=f"pytest exceeded {self.timeout:g}s")
         except (OSError, ValueError) as error:
             result["output"] = str(error)
         result["seconds"] = round(monotonic() - start, 3)
