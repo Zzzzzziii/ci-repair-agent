@@ -52,6 +52,8 @@ Agent 开始执行修复任务前，会在任务目录生成 `manifest.json`，�
 
 每次测试结果还记录实际执行的 `command` 和 `cwd`。达到 `timeout` 时，执行器会终止当前测试的进程树，报告为 `timeout`，并保留停止前的日志和输出摘要。系统无法完成进程树清理时，`cleanup_error` 会说明问题。
 
+`collected` 列出 pytest 筛选后选中的用例，`session_finished` 表示会话结束的证据已写入。执行只完成了收集时，已选中却没有运行的用例会标为 `not_run`，即使 pytest 返回 0，Agent 也会报告 `incomplete`。验收会比较各候选与基线的收集范围，`missing_tests` 记录消失的用例，`unexecuted_tests` 记录已收集但没运行的用例。测试在收集后超时时，可以从 `pytest.json` 查看已保存的收集清单。
+
 ### 暂停和记忆
 
 加 `--pause-after-candidate` 可在第一个候选验证后主动暂停。也可以在进程退出后查看已保存进度并恢复：

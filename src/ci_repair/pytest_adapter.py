@@ -39,6 +39,30 @@ def test_status(phases: dict) -> str:
     return phases.get("call", {}).get("status", "not_run")
 
 
+def read_evidence(result: dict, path: Path) -> None:
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    result["collected"] = evidence["collected"]
+    result["session_finished"] = evidence["session_finished"]
+    result["collection_errors"] = evidence["collection_errors"]
+    phases_by_node = evidence["phases"]
+    if result["session_finished"]:
+        phases_by_node = {**{node: {} for node in result["collected"] or []}, **phases_by_node}
+    result["tests"] = {
+        node: {"status": test_status(phases), "phases": phases} for node, phases in phases_by_node.items()
+    }
+    if result["status"] == "timeout" or not result["session_finished"]:
+        return
+
+    statuses = {test["status"] for test in result["tests"].values()}
+    if result["collection_errors"] or "error" in statuses:
+        return
+    exit_code = result["exit_code"]
+    if exit_code == 0 and (not statuses or "not_run" in statuses):
+        result["status"] = "incomplete"
+    else:
+        result["status"] = {0: "passed", 1: "failed", 5: "no_tests"}.get(exit_code, "error")
+
+
 class PytestAdapter:
     def __init__(
         self, interpreter: Path, scratch: Path, timeout: float, *, task_directory: Path | None = None,
@@ -56,6 +80,8 @@ class PytestAdapter:
             "status": "error",
             "exit_code": None,
             "tests": {},
+            "collected": None,
+            "session_finished": False,
             "collection_errors": [],
             "output": "",
             "cwd": str(directory),
@@ -88,20 +114,8 @@ class PytestAdapter:
                     result["output"] = (notice + process["output"][-(OUTPUT_LIMIT - len(notice)):]).rstrip()
                     if process["cleanup_error"]:
                         result["cleanup_error"] = process["cleanup_error"]
-                elif report.is_file():
-                    evidence = json.loads(report.read_text(encoding="utf-8"))
-                    result["collection_errors"] = evidence["collection_errors"]
-                    result["tests"] = {
-                        node: {"status": test_status(phases), "phases": phases}
-                        for node, phases in evidence["phases"].items()
-                    }
-                    has_error = evidence["collection_errors"] or any(
-                        test["status"] == "error" for test in result["tests"].values()
-                    )
-                    if not has_error:
-                        result["status"] = {0: "passed", 1: "failed", 5: "no_tests"}.get(
-                            process["exit_code"], "error"
-                        )
+                if report.is_file():
+                    read_evidence(result, report)
         except (OSError, ValueError) as error:
             result["output"] = str(error)
         result["seconds"] = round(monotonic() - start, 3)
