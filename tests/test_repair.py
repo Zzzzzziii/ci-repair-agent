@@ -66,6 +66,8 @@ def test_reports_real_execution_states(tmp_path, monkeypatch):
     assert Path(result["command"][0]) == Path(sys.executable)
     assert result["command"][-1] == sample.name
     assert Path(result["cwd"]) == tmp_path
+    assert result["session_finished"]
+    assert set(result["collected"]) == result["tests"].keys()
     assert {key.split("::")[1]: value["status"] for key, value in result["tests"].items()} == {
         "test_pass": "passed", "test_fail": "failed", "test_skip": "skipped",
         "test_expected_failure": "xfailed",
@@ -84,6 +86,33 @@ def test_reports_real_execution_states(tmp_path, monkeypatch):
     assert timed_out["status"] == "timeout"
     assert (task_directory / timed_out["artifacts"]["stdout"]).is_file()
     assert (task_directory / timed_out["artifacts"]["stderr"]).is_file()
+
+
+def test_records_collected_tests_without_execution(tmp_path, monkeypatch):
+    sample = tmp_path / "test_wait.py"
+    sample.write_text("import time\n\ndef test_wait():\n    time.sleep(12)\n", encoding="utf-8")
+    task_directory = tmp_path / "task"
+    node = "test_wait.py::test_wait"
+
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--collect-only")
+    result = PytestAdapter(Path(sys.executable), tmp_path, 15, task_directory=task_directory).run(
+        tmp_path, [sample.name],
+    )
+    assert result["exit_code"] == 0
+    assert result["session_finished"]
+    assert result["collected"] == [node]
+    assert result["status"] == "incomplete"
+    assert result["tests"][node]["status"] == "not_run"
+
+    monkeypatch.delenv("PYTEST_ADDOPTS")
+    interrupted = PytestAdapter(Path(sys.executable), tmp_path, 3, task_directory=task_directory).run(
+        tmp_path, [sample.name],
+    )
+    assert interrupted["status"] == "timeout"
+    assert not interrupted["session_finished"]
+    assert interrupted["collected"] == [node]
+    assert interrupted["tests"] == {}
+    assert (task_directory / interrupted["artifacts"]["pytest_report"]).is_file()
 
 
 def test_extracts_parameterized_nodes():
@@ -241,6 +270,37 @@ def test_saves_rejected_model_candidate(tmp_path, monkeypatch):
     assert report["status"] == validation["status"] == "rejected"
     assert candidate["diff_artifact"] == validation["candidate_diff"]
     assert (report_path.parent / candidate["diff_artifact"]).read_bytes() == proposed_diff.encode("utf-8")
+    assert not (report_path.parent / "fix.diff").exists()
+
+
+def test_rejects_dropped_regression_case(tmp_path):
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "shop.py").write_text('price = 5\ncases = ["regular", "old_failure"]\n', encoding="utf-8")
+    (fixture / "test_shop.py").write_text(
+        'import pytest\nfrom shop import price, cases\n\n'
+        'def test_price():\n    assert price == 9\n\n'
+        '@pytest.mark.parametrize("case", cases)\n'
+        'def test_case(case):\n    assert case != "old_failure"\n', encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    make_repository(repo, fixture)
+    storage = tmp_path / "state"
+    patch = tmp_path / "repair.diff"
+    create_patch(repo, "shop.py", 'price = 9\ncases = ["regular"]\n', patch)
+
+    result = cli(storage, "fix", "--repo", str(repo), "--test", "test_shop.py::test_price", "--patch", str(patch))
+    assert result.returncode == 1, result.stdout + result.stderr
+    report_path, = (storage / "runs").glob("*/report.json")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    missing = "test_shop.py::test_case[old_failure]"
+    assert report["reference"]["regression"]["tests"][missing]["status"] == "failed"
+    validation, = report["validations"]
+    assert validation["target"]["status"] == "passed"
+    assert validation["regression"]["status"] == "passed"
+    assert validation["missing_tests"] == validation["regressions"] == [missing]
+    assert validation["status"] == "rejected"
+    assert validation["reason"] == "Previously collected regression tests are missing"
     assert not (report_path.parent / "fix.diff").exists()
 
 

@@ -8,9 +8,19 @@ import pytest
 
 
 class Reporter:
-    def __init__(self):
+    def __init__(self, destination: Path):
+        self.destination = destination
+        self.collected = None
         self.phases = {}
         self.collection_errors = []
+        self.session_finished = False
+
+    def pytest_collection_finish(self, session):
+        self.collected = [item.nodeid for item in session.items]
+        self.write_evidence()
+
+    def pytest_sessionfinish(self):
+        self.session_finished = True
 
     def pytest_runtest_logreport(self, report):
         outcome = report.outcome
@@ -26,19 +36,27 @@ class Reporter:
         if report.failed:
             self.collection_errors.append(report.longreprtext)
 
+    def write_evidence(self):
+        evidence = {
+            "collected": self.collected,
+            "phases": self.phases,
+            "collection_errors": self.collection_errors,
+            "session_finished": self.session_finished,
+        }
+        temporary = self.destination.with_suffix(".tmp")
+        temporary.write_text(json.dumps(evidence), encoding="utf-8")
+        temporary.replace(self.destination)
+
 
 def main():
     destination = Path(sys.argv[1])
-    reporter = Reporter()
+    reporter = Reporter(destination)
     sys.path.insert(0, str(Path.cwd()))
     exit_code = pytest.main(
         ["-q", "-p", "no:cacheprovider", "--tb=short", f"--rootdir={Path.cwd()}", "--", *sys.argv[2:]],
         plugins=[reporter],
     )
-    destination.write_text(
-        json.dumps({"phases": reporter.phases, "collection_errors": reporter.collection_errors}),
-        encoding="utf-8",
-    )
+    reporter.write_evidence()
     return exit_code
 
 

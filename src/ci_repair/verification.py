@@ -29,6 +29,13 @@ def status_of(run: dict, node: str) -> str:
     return run["tests"].get(node, {}).get("status", "missing")
 
 
+def collected_tests(run: dict) -> set[str] | None:
+    collected = run.get("collected")
+    if collected is None and not run["tests"]:
+        return None
+    return set(collected or ()).union(run["tests"])
+
+
 def verify(adapter: PytestAdapter, task: dict, reference: dict, patch: str, scratch: Path) -> dict:
     with worktree(Path(task["repository"]), task["commit"], scratch) as tree:
         directory = within(tree, task["cwd"])
@@ -42,12 +49,21 @@ def verify(adapter: PytestAdapter, task: dict, reference: dict, patch: str, scra
         except (ValueError, OSError) as error:
             return {"status": "rejected", "reason": str(error)}
         target = adapter.run(directory, task["targets"], tree=tree)
-        if target["status"] != "passed" or any(
-            status_of(target, node) != "passed" for node in task["targets"]
-        ):
-            return {"status": "rejected", "reason": "Target tests did not all pass", "target": target}
+        target_outcomes = {node: status_of(target, node) for node in task["targets"]}
+        if target["status"] != "passed" or any(outcome != "passed" for outcome in target_outcomes.values()):
+            return {
+                "status": "rejected", "reason": "Target tests did not all pass",
+                "target": target, "target_outcomes": target_outcomes,
+            }
 
         regression = adapter.run(directory, task["regression"], tree=tree)
+        baseline_collection = collected_tests(reference["regression"])
+        candidate_collection = collected_tests(regression)
+        missing_tests = (
+            sorted(baseline_collection - candidate_collection)
+            if baseline_collection is not None and candidate_collection is not None else []
+        )
+        unexecuted_tests = sorted(node for node, record in regression["tests"].items() if record["status"] == "not_run")
         regressions = [
             node for node, record in reference["regression"]["tests"].items()
             if record["status"] == "passed" and status_of(regression, node) != "passed"
@@ -62,11 +78,17 @@ def verify(adapter: PytestAdapter, task: dict, reference: dict, patch: str, scra
             "status": "rejected",
             "target": target,
             "regression": regression,
-            "regressions": sorted(set(regressions + new_failures)),
+            "regressions": sorted(set(regressions + new_failures + missing_tests + unexecuted_tests)),
             "remaining_failures": remaining_failures,
+            "missing_tests": missing_tests,
+            "unexecuted_tests": unexecuted_tests,
         }
         if regression["status"] not in VALID_TEST_RUN:
             result["reason"] = f"Regression execution: {regression['status']}"
+        elif missing_tests:
+            result["reason"] = "Previously collected regression tests are missing"
+        elif unexecuted_tests:
+            result["reason"] = "Collected regression tests did not run"
         elif result["regressions"]:
             result["reason"] = "New regression failures or previously passing tests did not pass"
         else:
