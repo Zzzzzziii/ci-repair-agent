@@ -34,6 +34,8 @@ uv run ci-repair doctor --repo D:\my-service --import my_package
 
 `doctor` 输出 Python 和 pytest 版本、工作目录、回归范围，以及 `--import` 指定模块在当前检出中的解析路径。配置 `source_paths = ["src"]` 后，`fix` 会在每个临时 worktree 中把该版本的 `src` 加到 `PYTHONPATH` 前面。实际使用的配置会保存在任务清单里，暂停后继续沿用。
 
+要验证测试加载的源码，在配置中加 `import_modules = ["my_package"]`，或给 `fix` 传 `--import my_package`。`doctor` 也会检查配置里的模块能解析到哪里。运行 pytest 时，报告的 `imports` 字段记录指定模块实际加载过的路径，`runtime` 字段记录测试进程的 Python 和 pytest 版本。目标测试或回归测试发现模块来自 worktree 外部时，修复任务或候选会被标为 `blocked`。每个指定模块至少要在一次目标测试或回归测试的 pytest 进程中被观察到。配置项应填写本项目的模块，混合命名空间包可填写项目所属的具体子模块。
+
 ### 修复报告
 
 输出中的任务 ID 对应 `~/.ci-repair/runs/<task_id>/report.json`。要换位置，在子命令前传 `--state-dir`。验收保留基线中已通过的用例，并单独记录基线已有的其他失败。首版支持修改已有的 Python 业务源码。补丁应用在临时 Git worktree 中，用户的当前工作目录不受影响。测试以目标解释器在本机执行，请用于自己的仓库。

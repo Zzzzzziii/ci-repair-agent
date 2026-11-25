@@ -66,6 +66,7 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
             task["timeout"],
             task_directory=storage / "runs" / task["id"],
             source_paths=task.get("source_paths"),
+            import_modules=task.get("import_modules"),
         )
 
     def reproduce(state: RepairState):

@@ -115,6 +115,20 @@ def test_records_collected_tests_without_execution(tmp_path, monkeypatch):
     assert (task_directory / interrupted["artifacts"]["pytest_report"]).is_file()
 
 
+def test_records_module_imported_during_test(tmp_path):
+    source = tmp_path / "local_module.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    sample = tmp_path / "test_sample.py"
+    sample.write_text("def test_value():\n    from local_module import value\n    assert value == 1\n", encoding="utf-8")
+    result = PytestAdapter(
+        Path(sys.executable), tmp_path, 15, import_modules=["local_module", "unused_module"],
+    ).run(tmp_path, [sample.name])
+    assert result["status"] == "passed"
+    assert result["imports"]["local_module"] == {"status": "in_worktree", "origins": [str(source.resolve())]}
+    assert result["imports"]["unused_module"] == {"status": "not_observed", "origins": []}
+    assert result["runtime"]["pytest_version"]
+
+
 def test_extracts_parameterized_nodes():
     assert failing_nodes(
         "\x1b[31mFAILED\x1b[0m tests\\test_shipping.py::test_fee[remote zone] - AssertionError\n"
@@ -309,23 +323,28 @@ def test_config_uses_candidate_src(tmp_path, monkeypatch):
     source = Path("service/src/demo_shop/__init__.py")
     (fixture / source).parent.mkdir(parents=True)
     (fixture / source).write_text("price = 5\n", encoding="utf-8")
+    (fixture / "service" / "settings.py").write_text("prefer_installed = False\n", encoding="utf-8")
     tests = fixture / "service" / "tests"
     tests.mkdir()
     (tests / "test_price.py").write_text(
+        "import os\nimport sys\nfrom settings import prefer_installed\n"
+        'if prefer_installed:\n    sys.path.insert(0, os.environ["CI_REPAIR_FIXTURE_INSTALLED"])\n'
         "from demo_shop import price\n\ndef test_price():\n    assert price == 9\n", encoding="utf-8",
     )
     (fixture / ".ci-repair.toml").write_text(
-        'cwd = "service"\nsource_paths = ["service/src"]\nregression = ["tests"]\n', encoding="utf-8",
+        'cwd = "service"\nsource_paths = ["service/src"]\nimport_modules = ["demo_shop"]\nregression = ["tests"]\n',
+        encoding="utf-8",
     )
     old_package = tmp_path / "installed" / "demo_shop"
     old_package.mkdir(parents=True)
     (old_package / "__init__.py").write_text("price = 9\n", encoding="utf-8")
     monkeypatch.setenv("PYTHONPATH", str(old_package.parent))
+    monkeypatch.setenv("CI_REPAIR_FIXTURE_INSTALLED", str(old_package.parent))
     repo = tmp_path / "repo"
     make_repository(repo, fixture)
     storage = tmp_path / "state"
 
-    doctor = cli(storage, "doctor", "--repo", str(repo), "--import", "demo_shop")
+    doctor = cli(storage, "doctor", "--repo", str(repo))
     assert doctor.returncode == 0, doctor.stderr
     diagnosis = json.loads(doctor.stdout)
     assert diagnosis["status"] == "ready"
@@ -338,18 +357,40 @@ def test_config_uses_candidate_src(tmp_path, monkeypatch):
     assert json.loads(missing.stdout)["missing_imports"] == ["uninstalled_ci_fixture_package"]
 
     patch = tmp_path / "repair.diff"
+    wrong_patch = tmp_path / "prefer-installed.diff"
     create_patch(repo, source.as_posix(), "price = 9\n", patch)
+    create_patch(repo, "service/settings.py", "prefer_installed = True\n", wrong_patch)
     result = cli(storage, "fix", "--repo", str(repo), "--test", "tests/test_price.py::test_price",
-                 "--patch", str(patch))
+                 "--patch", str(wrong_patch), "--patch", str(patch))
     assert result.returncode == 0, result.stdout + result.stderr
     report_path, = (storage / "runs").glob("*/report.json")
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["reference"]["target"]["status"] == "failed"
-    assert report["validations"][0]["regression"]["status"] == "passed"
+    assert report["reference"]["target"]["imports"]["demo_shop"]["status"] == "in_worktree"
+    wrong, correct = report["validations"]
+    assert wrong["status"] == "blocked"
+    assert wrong["target"]["status"] == "passed"
+    assert wrong["target"]["imports"]["demo_shop"] == {
+        "status": "outside_worktree", "origins": [str((old_package / "__init__.py").resolve())],
+    }
+    assert correct["status"] == "accepted"
+    assert correct["regression"]["status"] == "passed"
+    assert correct["regression"]["imports"]["demo_shop"]["status"] == "in_worktree"
     manifest = json.loads((report_path.parent / report["manifest"]).read_text(encoding="utf-8"))
     assert manifest["cwd"] == diagnosis["cwd"] == "service"
     assert manifest["source_paths"] == diagnosis["source_paths"] == ["service/src"]
+    assert manifest["import_modules"] == diagnosis["import_modules"] == ["demo_shop"]
     assert manifest["regression"] == diagnosis["regression"] == ["tests"]
+
+    missing_runtime = cli(
+        storage, "fix", "--repo", str(repo), "--test", "tests/test_price.py::test_price",
+        "--import", "unobserved_project_fixture", "--patch", str(patch),
+    )
+    assert missing_runtime.returncode == 2, missing_runtime.stdout + missing_runtime.stderr
+    task_id = missing_runtime.stdout.splitlines()[0].split()[-1]
+    blocked_report = json.loads((storage / "runs" / task_id / "report.json").read_text(encoding="utf-8"))
+    assert blocked_report["status"] == "blocked"
+    assert blocked_report["reason"] == "Project imports were not observed: unobserved_project_fixture"
 
 
 @pytest.mark.parametrize(("purpose", "status", "error_type"), [

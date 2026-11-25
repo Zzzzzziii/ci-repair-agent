@@ -47,6 +47,7 @@ def record_run_inputs(directory: Path, task: dict, log: bytes | None) -> None:
         "project_config": task.get("project_config"),
         "python": task["python"],
         "source_paths": task.get("source_paths", []),
+        "import_modules": task.get("import_modules", []),
         "regression": task["regression"],
         "timeout": task["timeout"],
         "targets": task["targets"],
