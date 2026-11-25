@@ -1,0 +1,6 @@
+# Copy to .ci-repair.toml in the target Git repository.
+cwd = "."
+source_paths = ["src"]  # Use [] for a flat layout.
+regression = ["tests"]  # Paths and node IDs are relative to cwd.
+timeout = 120
+# python = ".venv/Scripts/python.exe"  # Windows. Use .venv/bin/python on Linux/macOS.

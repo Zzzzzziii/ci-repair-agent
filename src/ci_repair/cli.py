@@ -1,11 +1,9 @@
 import argparse
 from contextlib import closing
 import json
-import math
 import os
 from pathlib import Path
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -14,9 +12,20 @@ from uuid import UUID, uuid4
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from ci_repair.artifacts import append_workflow_event, publish, record_run_inputs
+from ci_repair.project import check_project, resolve_project_profile, validate_selector
 from ci_repair.pytest_adapter import failing_nodes, normalized_node
 from ci_repair.workflow import build_workflow
-from ci_repair.workspace import commit_id, repository_key, repository_path, within
+from ci_repair.workspace import commit_id, repository_key
+
+
+def add_project_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--repo", type=Path, required=True)
+    command.add_argument("--config", type=Path, help="Project TOML; defaults to .ci-repair.toml in the repository")
+    command.add_argument("--cwd", help="Target project directory relative to the repository")
+    command.add_argument("--python", help="Python interpreter with target dependencies")
+    command.add_argument("--source-path", action="append", help="Source directory relative to the repository; repeatable")
+    command.add_argument("--regression", action="append", help="Regression path or node ID relative to --cwd; repeatable")
+    command.add_argument("--timeout", type=float, help="Timeout per pytest invocation in seconds")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -24,19 +33,18 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--state-dir", type=Path, default=Path.home() / ".ci-repair")
     subcommands = command.add_subparsers(dest="command", required=True)
     fix = subcommands.add_parser("fix", help="Start a repair task")
-    fix.add_argument("--repo", type=Path, required=True)
+    add_project_arguments(fix)
     fix.add_argument("--log", help="CI log path, or - for stdin")
     fix.add_argument("--commit", help="Commit tested by CI; defaults to local HEAD")
-    fix.add_argument("--cwd", default=".", help="Target project directory relative to the repository")
-    fix.add_argument("--python", default=sys.executable, help="Python interpreter with target dependencies")
     fix.add_argument("--test", action="append", default=[], help="Exact failed pytest node ID; repeatable")
-    fix.add_argument("--regression", action="append", default=[], help="Regression path or node ID; repeatable")
-    fix.add_argument("--timeout", type=float, default=120, help="Timeout per pytest invocation in seconds")
     fix.add_argument("--model", default=os.environ.get("CI_REPAIR_MODEL"), help="LangChain provider:model identifier")
     fix.add_argument("--strategy", choices=["batch", "sequential"], default="batch")
     fix.add_argument("--no-memory", action="store_true")
     fix.add_argument("--patch", type=Path, action="append", default=[], help="Verify a supplied diff without a model")
     fix.add_argument("--pause-after-candidate", action="store_true", help="Checkpoint after verifying one candidate")
+    doctor = subcommands.add_parser("doctor", help="Check a project's Python environment and test plan")
+    add_project_arguments(doctor)
+    doctor.add_argument("--import", dest="imports", action="append", default=[], help="Module to locate; repeatable")
     for name in ("status", "resume"):
         subcommands.add_parser(name).add_argument("task_id", type=UUID)
     return command
@@ -51,39 +59,27 @@ def read_ci_log(path: str | None) -> bytes | None:
 
 
 def new_state(args, log: str) -> dict:
-    repository = repository_path(args.repo)
-    directory = within(repository, args.cwd).relative_to(repository).as_posix()
+    profile = project_profile(args)
+    repository = Path(profile["repository"])
     targets = list(dict.fromkeys(normalized_node(node) for node in (args.test or failing_nodes(log))))
     log_commit = re.search(r"^(?:GITHUB_SHA=|commit:[ \t]*)([0-9a-fA-F]{40})[ \t]*$", log, re.MULTILINE)
     ref = args.commit or (log_commit[1] if log_commit else "HEAD")
-    for node in [*targets, *args.regression]:
-        path = node.partition("::")[0]
-        if not path or path.startswith("-") or Path(path).is_absolute() or Path(path).drive:
-            raise ValueError(f"Expected a pytest selector relative to --cwd: {node}")
-        within(repository / directory, path)
+    for node in targets:
+        validate_selector(repository / profile["cwd"], node)
     if not targets or any("::" not in node for node in targets):
         raise ValueError("No exact failed pytest node IDs found; supply --test path/to/test.py::test_name")
-    if not math.isfinite(args.timeout) or args.timeout <= 0:
-        raise ValueError("--timeout must be a positive finite number")
     if len(args.patch) > 2:
         raise ValueError("Supply at most two candidate patches")
     if not args.patch and not args.model:
         raise ValueError("Set CI_REPAIR_MODEL or pass --model provider:model; --patch verifies offline")
-    python = shutil.which(args.python)
-    if python is None:
-        raise ValueError(f"Python interpreter not found: {args.python}")
     return {
         "task": {
+            **profile,
             "id": str(uuid4()),
-            "repository": str(repository),
             "repository_key": repository_key(repository),
             "commit": commit_id(repository, ref),
             "commit_source": "argument" if args.commit else "CI log" if log_commit else "local HEAD",
-            "cwd": directory,
-            "python": str(Path(python).absolute()),
             "targets": targets,
-            "regression": args.regression,
-            "timeout": args.timeout,
             "model": args.model if not args.patch else None,
             "strategy": args.strategy,
             "use_memory": not args.no_memory,
@@ -97,10 +93,21 @@ def new_state(args, log: str) -> dict:
     }
 
 
+def project_profile(args):
+    return resolve_project_profile(
+        args.repo, args.config, cwd=args.cwd, python=args.python, source_paths=args.source_path,
+        regression=args.regression, timeout=args.timeout,
+    )
+
+
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     storage = args.state_dir.resolve()
     try:
+        if args.command == "doctor":
+            diagnosis = check_project(project_profile(args), args.imports)
+            print(json.dumps(diagnosis, ensure_ascii=False, indent=2))
+            return 0 if diagnosis["status"] == "ready" else 2
         initial = None
         input_log = None
         if args.command == "fix":

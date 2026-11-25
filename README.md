@@ -24,6 +24,18 @@ uv run ci-repair fix --repo D:\checkout-service --test 'tests/test_checkout.py::
 - `--strategy batch` 一次生成最多两个候选，默认启用。`--strategy sequential` 先验证一个候选，失败后把测试反馈交给模型再试一次。
 - `--patch` 可重复传入一或两份现成 diff，走相同验收流程，无需模型密钥。
 
+### 接入自己的项目
+
+将[配置示例](examples/ci-repair.example.toml)复制到目标 Git 仓库根目录，命名为 `.ci-repair.toml`，按项目布局修改。`cwd` 和 `source_paths` 相对于仓库根目录，`regression` 相对于 `cwd`。配置中的 Python 相对路径以仓库根目录为准，也可以写 PATH 里的解释器命令。`fix` 和 `doctor` 自动读取该文件，也接受 `--config` 指定其他文件。命令行传入的值优先于配置和默认值。
+
+```powershell
+uv run ci-repair doctor --repo D:\my-service --import my_package
+```
+
+`doctor` 输出 Python 和 pytest 版本、工作目录、回归范围，以及 `--import` 指定模块在当前检出中的解析路径。配置 `source_paths = ["src"]` 后，`fix` 会在每个临时 worktree 中把该版本的 `src` 加到 `PYTHONPATH` 前面。实际使用的配置会保存在任务清单里，暂停后继续沿用。
+
+### 修复报告
+
 输出中的任务 ID 对应 `~/.ci-repair/runs/<task_id>/report.json`。要换位置，在子命令前传 `--state-dir`。验收保留基线中已通过的用例，并单独记录基线已有的其他失败。首版支持修改已有的 Python 业务源码。补丁应用在临时 Git worktree 中，用户的当前工作目录不受影响。测试以目标解释器在本机执行，请用于自己的仓库。
 
 Agent 开始执行修复任务前，会在任务目录生成 `manifest.json`，记录任务 ID、代码提交及其来源、失败用例和所选模型。传入 `--log` 时，输入日志保存在 `artifacts/input/ci.log`。只有 `--test` 时，清单里的 `input_log` 为 `null`。恢复暂停的任务时，原来的清单和日志会保留下来。可以从 `report.json` 的 `manifest` 字段找到清单。

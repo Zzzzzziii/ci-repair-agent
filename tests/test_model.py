@@ -1,12 +1,14 @@
 import json
 
 from langchain_core.messages import AIMessage, ToolMessage
+import pytest
 
 from ci_repair import model
 from ci_repair.workspace import commit_id, git
 
 
-def test_model_uses_real_repository_tool_before_proposal(tmp_path, monkeypatch):
+@pytest.mark.parametrize("model_name", ["deepseek:deepseek-flash", "deepseek-flash"])
+def test_model_uses_real_repository_tool_before_proposal(tmp_path, monkeypatch, model_name):
     git(tmp_path, "init", "--quiet")
     model_key = "fixture-deepseek-key"
     monkeypatch.setenv("DEEPSEEK_API_KEY", model_key)
@@ -48,12 +50,12 @@ def test_model_uses_real_repository_tool_before_proposal(tmp_path, monkeypatch):
             ])
 
     def init_model(name, **options):
-        assert name == "deepseek:deepseek-flash"
+        assert name == model_name
         assert options["extra_body"] == {"thinking": {"type": "disabled"}}
         return ScriptedModel()
 
     monkeypatch.setattr(model, "init_chat_model", init_model)
-    proposal = model.propose("deepseek:deepseek-flash", tmp_path, {
+    proposal = model.propose(model_name, tmp_path, {
         "id": "test-task", "commit": commit_id(tmp_path, "HEAD"), "targets": ["test_shipping.py::test_fee"],
         "strategy": "batch",
     }, "AssertionError", [], [], task_directory=task_directory)

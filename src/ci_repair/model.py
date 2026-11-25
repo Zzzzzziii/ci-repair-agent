@@ -176,7 +176,7 @@ def execute_repository_tool(call, item, *, budget_available: bool, model_call_id
 def propose(model_name: str, tree: Path, task: dict, failure: str, history: list[dict],
             feedback: list[dict], *, task_directory: Path | None = None) -> dict:
     model_options = {"temperature": 0, "max_retries": 1, "timeout": 60}
-    if model_name.startswith("deepseek:"):
+    if model_name.startswith(("deepseek:", "deepseek-")):
         # Structured patch output uses forced tool selection, which needs thinking disabled.
         model_options["extra_body"] = {"thinking": {"type": "disabled"}}
     tools = repository_tools(tree, task["commit"])

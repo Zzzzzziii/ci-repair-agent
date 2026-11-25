@@ -1,6 +1,16 @@
 from typing import Literal, TypedDict
 
 
+class ProjectProfile(TypedDict):
+    repository: str
+    project_config: str | None
+    cwd: str
+    python: str
+    source_paths: list[str]
+    regression: list[str]
+    timeout: float
+
+
 class RunManifest(TypedDict):
     schema_version: int
     task_id: str
@@ -9,6 +19,11 @@ class RunManifest(TypedDict):
     commit: str
     commit_source: str
     cwd: str
+    project_config: str | None
+    python: str
+    source_paths: list[str]
+    regression: list[str]
+    timeout: float
     targets: list[str]
     model: str | None
     input_log: str | None

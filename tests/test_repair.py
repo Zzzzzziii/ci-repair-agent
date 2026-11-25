@@ -241,6 +241,54 @@ def test_saves_rejected_model_candidate(tmp_path, monkeypatch):
     assert not (report_path.parent / "fix.diff").exists()
 
 
+def test_config_uses_candidate_src(tmp_path, monkeypatch):
+    fixture = tmp_path / "fixture"
+    source = Path("service/src/demo_shop/__init__.py")
+    (fixture / source).parent.mkdir(parents=True)
+    (fixture / source).write_text("price = 5\n", encoding="utf-8")
+    tests = fixture / "service" / "tests"
+    tests.mkdir()
+    (tests / "test_price.py").write_text(
+        "from demo_shop import price\n\ndef test_price():\n    assert price == 9\n", encoding="utf-8",
+    )
+    (fixture / ".ci-repair.toml").write_text(
+        'cwd = "service"\nsource_paths = ["service/src"]\nregression = ["tests"]\n', encoding="utf-8",
+    )
+    old_package = tmp_path / "installed" / "demo_shop"
+    old_package.mkdir(parents=True)
+    (old_package / "__init__.py").write_text("price = 9\n", encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", str(old_package.parent))
+    repo = tmp_path / "repo"
+    make_repository(repo, fixture)
+    storage = tmp_path / "state"
+
+    doctor = cli(storage, "doctor", "--repo", str(repo), "--import", "demo_shop")
+    assert doctor.returncode == 0, doctor.stderr
+    diagnosis = json.loads(doctor.stdout)
+    assert diagnosis["status"] == "ready"
+    assert Path(diagnosis["imports"]["demo_shop"]) == repo / source
+    assert diagnosis["pytest_version"]
+    assert not storage.exists()
+
+    missing = cli(storage, "doctor", "--repo", str(repo), "--import", "uninstalled_ci_fixture_package")
+    assert missing.returncode == 2
+    assert json.loads(missing.stdout)["missing_imports"] == ["uninstalled_ci_fixture_package"]
+
+    patch = tmp_path / "repair.diff"
+    create_patch(repo, source.as_posix(), "price = 9\n", patch)
+    result = cli(storage, "fix", "--repo", str(repo), "--test", "tests/test_price.py::test_price",
+                 "--patch", str(patch))
+    assert result.returncode == 0, result.stdout + result.stderr
+    report_path, = (storage / "runs").glob("*/report.json")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["reference"]["target"]["status"] == "failed"
+    assert report["validations"][0]["regression"]["status"] == "passed"
+    manifest = json.loads((report_path.parent / report["manifest"]).read_text(encoding="utf-8"))
+    assert manifest["cwd"] == diagnosis["cwd"] == "service"
+    assert manifest["source_paths"] == diagnosis["source_paths"] == ["service/src"]
+    assert manifest["regression"] == diagnosis["regression"] == ["tests"]
+
+
 @pytest.mark.parametrize(("purpose", "status", "error_type"), [
     ("initialize", "setup_failed", "ValueError"),
     ("explore", "request_failed", "TimeoutError"),
