@@ -1,6 +1,13 @@
 from typing import Literal, TypedDict
 
 
+class ProcessResult(TypedDict):
+    exit_code: int | None
+    timed_out: bool
+    output: str
+    cleanup_error: str | None
+
+
 class ProjectProfile(TypedDict):
     repository: str
     project_config: str | None

@@ -50,6 +50,8 @@ Agent 开始执行修复任务前，会在任务目录生成 `manifest.json`，�
 
 每次 pytest 执行的完整终端输出保存在任务目录的 `artifacts/pytest/<run_id>/stdout.log` 与 `stderr.log`。pytest 写出逐用例报告时，同目录还有 `pytest.json`，其中包含用例各阶段的状态、耗时和失败详情。在 `report.json` 中，从 `reference.target`、`reference.regression` 或某个 `validations` 条目的测试结果读取 `artifacts`，就能找到对应文件。路径相对于 `report.json` 所在目录。测试超时后也可查看已经写出的日志。
 
+每次测试结果还记录实际执行的 `command` 和 `cwd`。达到 `timeout` 时，执行器会终止当前测试的进程树，报告为 `timeout`，并保留停止前的日志和输出摘要。系统无法完成进程树清理时，`cleanup_error` 会说明问题。
+
 ### 暂停和记忆
 
 加 `--pause-after-candidate` 可在第一个候选验证后主动暂停。也可以在进程退出后查看已保存进度并恢复：
