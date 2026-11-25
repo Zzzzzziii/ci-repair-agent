@@ -59,7 +59,9 @@ uv run python evals/run.py --output .ci-repair/eval-live --model $env:CI_REPAIR_
 
 自动化测试覆盖逐用例结果、工具调用、补丁验收、两份独立仓库和进程退出后恢复。评测脚本准备 20 个合成案例，覆盖 5 类缺陷。离线模式使用已知补丁检查评测流程。模型模式比较批量候选、顺序重试和历史记忆，并用模型未见过的测试验收输出。结果写入 `results.json` 和 `summary.json`。
 
-GitHub Actions 的 [演示工作流](.github/workflows/ci-repair-demo.yml) 会在结算示例路径发生推送或手动启动时运行测试，失败后调用相同的 CLI。将 DeepSeek 密钥保存为仓库 Secret `API_KEY`。默认模型是 `deepseek:deepseek-flash`。如果仓库已有 `CI_REPAIR_MODEL` 变量，将它更新为这个值或另一个支持工具调用的 DeepSeek 模型。补丁和报告可从 Actions 产物下载。
+GitHub Actions 的 [CI Repair Agent baseline](.github/workflows/ci-repair-demo.yml) 会在结算示例代码推送时运行结算用例。要建立两组模型基线，在 GitHub 的 **Actions → CI Repair Agent baseline → Run workflow** 选择 `main` 并运行。运费 `shipping` 和结算 `checkout` 各有一个任务，分别采集 pytest 失败日志、调用同一个 Agent CLI 并验收候选补丁。
+
+工作流从仓库 Secret `API_KEY` 读取 DeepSeek 密钥，默认使用 `deepseek:deepseek-flash`。仓库变量 `CI_REPAIR_MODEL` 可以指定另一个支持工具调用的 DeepSeek 模型。每个任务结束后都会尝试上传自己的记录。在运行详情的 **Artifacts** 下载 `repair-results-shipping` 或 `repair-results-checkout`，从 `report.json` 查看验收结果，再沿 `model_calls`、`tool_events` 和候选补丁路径查看证据。
 
 各阶段的设计原因和验收目标见 [开发计划](DEVELOPMENT_PLAN.md)。
 

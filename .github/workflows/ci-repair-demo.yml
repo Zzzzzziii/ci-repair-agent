@@ -1,4 +1,4 @@
-name: Repair a failed checkout test
+name: CI Repair Agent baseline
 
 on:
   workflow_dispatch:
@@ -11,7 +11,14 @@ permissions:
 
 jobs:
   repair:
+    name: Repair ${{ matrix.example }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        example: ${{ fromJSON(github.event_name == 'push' && '["checkout"]' || '["shipping","checkout"]') }}
+    env:
+      EXAMPLE_DIR: examples/${{ matrix.example }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,21 +30,31 @@ jobs:
         shell: bash
         run: |
           set +e
-          python -m pytest -q examples/checkout 2>&1 | tee ci-error.log
-          echo "test_exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          python -m pytest -q "$EXAMPLE_DIR" 2>&1 | tee ci-error.log
+          test_exit=${PIPESTATUS[0]}
+          set -e
+          echo "test_exit=$test_exit" >> "$GITHUB_OUTPUT"
+          if [[ "$test_exit" != '0' && "$test_exit" != '1' ]]; then
+            echo "::error::pytest could not run the baseline for $EXAMPLE_DIR (exit $test_exit)"
+            exit "$test_exit"
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' && "$test_exit" == '0' ]]; then
+            echo "::error::Expected a failing test in $EXAMPLE_DIR for the repair baseline"
+            exit 1
+          fi
       - name: Repair and verify
-        if: steps.baseline.outputs.test_exit != '0'
+        if: steps.baseline.outputs.test_exit == '1'
         env:
           CI_REPAIR_MODEL: ${{ vars.CI_REPAIR_MODEL || 'deepseek:deepseek-flash' }}
           DEEPSEEK_API_KEY: ${{ secrets.API_KEY }}
         run: |
           ci-repair --state-dir .ci-repair fix --repo . --commit "$GITHUB_SHA" \
-            --log ci-error.log --regression examples/checkout
+            --log ci-error.log --regression "$EXAMPLE_DIR"
       - name: Upload CI evidence and repair artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: repair-results
+          name: repair-results-${{ matrix.example }}
           path: |
             ci-error.log
             .ci-repair/runs/
