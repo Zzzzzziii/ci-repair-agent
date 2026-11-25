@@ -10,13 +10,13 @@ VALID_TEST_RUN = {"passed", "failed"}
 def baseline(adapter: PytestAdapter, task: dict, scratch: Path) -> dict:
     with worktree(Path(task["repository"]), task["commit"], scratch) as tree:
         directory = within(tree, task["cwd"])
-        target = adapter.run(directory, task["targets"])
+        target = adapter.run(directory, task["targets"], tree=tree)
         if target["status"] not in VALID_TEST_RUN:
             return {"target": target, "reason": f"Target execution: {target['status']}"}
         missing = [node for node in task["targets"] if status_of(target, node) != "failed"]
         if missing:
             return {"target": target, "reason": f"Failure not reproduced for: {', '.join(missing)}"}
-        regression = adapter.run(directory, task["regression"])
+        regression = adapter.run(directory, task["regression"], tree=tree)
         return {
             "target": target,
             "regression": regression,
@@ -41,13 +41,13 @@ def verify(adapter: PytestAdapter, task: dict, reference: dict, patch: str, scra
             actual_diff = apply_patch(tree, patch, test_paths)
         except (ValueError, OSError) as error:
             return {"status": "rejected", "reason": str(error)}
-        target = adapter.run(directory, task["targets"])
+        target = adapter.run(directory, task["targets"], tree=tree)
         if target["status"] != "passed" or any(
             status_of(target, node) != "passed" for node in task["targets"]
         ):
             return {"status": "rejected", "reason": "Target tests did not all pass", "target": target}
 
-        regression = adapter.run(directory, task["regression"])
+        regression = adapter.run(directory, task["regression"], tree=tree)
         regressions = [
             node for node, record in reference["regression"]["tests"].items()
             if record["status"] == "passed" and status_of(regression, node) != "passed"

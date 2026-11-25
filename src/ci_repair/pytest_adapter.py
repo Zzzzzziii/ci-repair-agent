@@ -5,6 +5,7 @@ import subprocess
 from time import monotonic
 
 from ci_repair.artifacts import pytest_run_directory
+from ci_repair.project import prepare_candidate_environment
 
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -47,14 +48,16 @@ def log_tail(path: Path, characters: int = 12000) -> str:
 
 class PytestAdapter:
     def __init__(
-        self, interpreter: Path, scratch: Path, timeout: float, *, task_directory: Path | None = None
+        self, interpreter: Path, scratch: Path, timeout: float, *, task_directory: Path | None = None,
+        source_paths: list[str] | None = None,
     ):
         self.interpreter = interpreter
         self.scratch = scratch
         self.timeout = timeout
         self.task_directory = task_directory
+        self.source_paths = source_paths or []
 
-    def run(self, directory: Path, selectors: list[str]) -> dict:
+    def run(self, directory: Path, selectors: list[str], *, tree: Path | None = None) -> dict:
         start = monotonic()
         result = {
             "status": "error",
@@ -65,6 +68,7 @@ class PytestAdapter:
         }
         worker = Path(__file__).with_name("pytest_reporter.py").resolve()
         try:
+            env = prepare_candidate_environment(tree or directory, self.source_paths)
             with pytest_run_directory(self.scratch, self.task_directory) as run_directory:
                 report = run_directory / "pytest.json"
                 stdout = run_directory / "stdout.log"
@@ -74,6 +78,7 @@ class PytestAdapter:
                         process = subprocess.run(
                             [str(self.interpreter), "-B", "-X", "utf8", str(worker), str(report), *selectors],
                             cwd=directory,
+                            env=env,
                             stdout=stdout_file,
                             stderr=stderr_file,
                             timeout=self.timeout,
