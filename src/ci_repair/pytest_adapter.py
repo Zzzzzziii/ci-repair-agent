@@ -39,11 +39,20 @@ def test_status(phases: dict) -> str:
     return phases.get("call", {}).get("status", "not_run")
 
 
-def read_evidence(result: dict, path: Path) -> None:
+def read_evidence(result: dict, path: Path, tree: Path) -> None:
     evidence = json.loads(path.read_text(encoding="utf-8"))
     result["collected"] = evidence["collected"]
     result["session_finished"] = evidence["session_finished"]
     result["collection_errors"] = evidence["collection_errors"]
+    result["runtime"] = evidence["runtime"]
+    tree = tree.resolve()
+    imports = {}
+    for name, origins in evidence["imports"].items():
+        status = "not_observed"
+        if origins:
+            status = "in_worktree" if all(Path(origin).is_relative_to(tree) for origin in origins) else "outside_worktree"
+        imports[name] = {"status": status, "origins": origins}
+    result["imports"] = imports
     phases_by_node = evidence["phases"]
     if result["session_finished"]:
         phases_by_node = {**{node: {} for node in result["collected"] or []}, **phases_by_node}
@@ -66,13 +75,14 @@ def read_evidence(result: dict, path: Path) -> None:
 class PytestAdapter:
     def __init__(
         self, interpreter: Path, scratch: Path, timeout: float, *, task_directory: Path | None = None,
-        source_paths: list[str] | None = None,
+        source_paths: list[str] | None = None, import_modules: list[str] | None = None,
     ):
         self.interpreter = interpreter
         self.scratch = scratch
         self.timeout = timeout
         self.task_directory = task_directory
         self.source_paths = source_paths or []
+        self.import_modules = import_modules or []
 
     def run(self, directory: Path, selectors: list[str], *, tree: Path | None = None) -> dict:
         start = monotonic()
@@ -87,13 +97,17 @@ class PytestAdapter:
             "cwd": str(directory),
         }
         worker = Path(__file__).with_name("pytest_reporter.py").resolve()
+        tree = tree or directory
         try:
-            env = prepare_candidate_environment(tree or directory, self.source_paths)
+            env = prepare_candidate_environment(tree, self.source_paths)
             with pytest_run_directory(self.scratch, self.task_directory) as run_directory:
                 report = run_directory / "pytest.json"
                 stdout = run_directory / "stdout.log"
                 stderr = run_directory / "stderr.log"
-                command = [str(self.interpreter), "-B", "-X", "utf8", str(worker), str(report), *selectors]
+                command = [
+                    str(self.interpreter), "-B", "-X", "utf8", str(worker), str(report),
+                    json.dumps(self.import_modules), *selectors,
+                ]
                 result["command"] = command
                 try:
                     process = run_process(
@@ -115,7 +129,7 @@ class PytestAdapter:
                     if process["cleanup_error"]:
                         result["cleanup_error"] = process["cleanup_error"]
                 if report.is_file():
-                    read_evidence(result, report)
+                    read_evidence(result, report, tree)
         except (OSError, ValueError) as error:
             result["output"] = str(error)
         result["seconds"] = round(monotonic() - start, 3)

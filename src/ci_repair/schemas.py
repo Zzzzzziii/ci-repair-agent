@@ -14,6 +14,7 @@ class ProjectProfile(TypedDict):
     cwd: str
     python: str
     source_paths: list[str]
+    import_modules: list[str]
     regression: list[str]
     timeout: float
 
@@ -29,6 +30,7 @@ class RunManifest(TypedDict):
     project_config: str | None
     python: str
     source_paths: list[str]
+    import_modules: list[str]
     regression: list[str]
     timeout: float
     targets: list[str]

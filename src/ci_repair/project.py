@@ -11,7 +11,7 @@ from ci_repair.workspace import repository_path, within
 
 
 DEFAULT_CONFIG = ".ci-repair.toml"
-CONFIG_KEYS = {"cwd", "python", "source_paths", "regression", "timeout"}
+CONFIG_KEYS = {"cwd", "python", "source_paths", "import_modules", "regression", "timeout"}
 PROJECT_PROBE = """
 import sys
 if sys.path and sys.path[0] == "":
@@ -52,7 +52,7 @@ def load_project_config(repository: Path, config: Path | None) -> tuple[Path | N
     for key in ("cwd", "python"):
         if key in settings and (not isinstance(settings[key], str) or not settings[key].strip()):
             raise ValueError(f"{key} in {path} must be a nonempty string")
-    for key in ("source_paths", "regression"):
+    for key in ("source_paths", "import_modules", "regression"):
         if key in settings and (
             not isinstance(settings[key], list)
             or any(not isinstance(value, str) or not value.strip() for value in settings[key])
@@ -78,6 +78,7 @@ def resolve_project_profile(
     cwd: str | None = None,
     python: str | None = None,
     source_paths: list[str] | None = None,
+    import_modules: list[str] | None = None,
     regression: list[str] | None = None,
     timeout: float | None = None,
 ) -> ProjectProfile:
@@ -97,6 +98,10 @@ def resolve_project_profile(
         validate_selector(directory, selector)
     paths = source_paths if source_paths is not None else settings.get("source_paths", [])
     roots = [within(repository, path.replace("\\", "/")).relative_to(repository).as_posix() for path in paths]
+    modules = import_modules if import_modules is not None else settings.get("import_modules", [])
+    for name in modules:
+        if not all(part.isidentifier() for part in name.split(".")):
+            raise ValueError(f"Expected a dotted Python module name: {name}")
     seconds = timeout if timeout is not None else settings.get("timeout", 120)
     if not 0 < seconds <= sys.float_info.max:
         raise ValueError("--timeout must be a positive finite number")
@@ -106,6 +111,7 @@ def resolve_project_profile(
         "cwd": directory.relative_to(repository).as_posix(),
         "python": str(Path(executable).absolute()),
         "source_paths": roots,
+        "import_modules": list(dict.fromkeys(modules)),
         "regression": selectors,
         "timeout": seconds,
     }
@@ -128,13 +134,13 @@ def prepare_candidate_environment(repository: Path, source_paths: list[str]) -> 
     return env
 
 
-def check_project(profile: ProjectProfile, modules: list[str]) -> dict:
+def check_project(profile: ProjectProfile) -> dict:
     repository = Path(profile["repository"])
     directory = within(repository, profile["cwd"])
     if not directory.is_dir():
         raise ValueError(f"Project directory not found: {directory}")
     probe = subprocess.run(
-        [profile["python"], "-B", "-X", "utf8", "-c", PROJECT_PROBE, *modules],
+        [profile["python"], "-B", "-X", "utf8", "-c", PROJECT_PROBE, *profile["import_modules"]],
         cwd=directory, env=prepare_candidate_environment(repository, profile["source_paths"]),
         capture_output=True, encoding="utf-8", errors="replace", timeout=min(profile["timeout"], 15),
     )

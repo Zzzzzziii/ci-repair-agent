@@ -7,12 +7,30 @@ from ci_repair.workspace import apply_patch, within, worktree
 VALID_TEST_RUN = {"passed", "failed"}
 
 
+def import_problem(*runs: dict, require_all: bool = False) -> str | None:
+    outcomes = {}
+    for run in runs:
+        for name, record in run.get("imports", {}).items():
+            outcomes.setdefault(name, set()).add(record["status"])
+
+    outside = sorted(name for name, seen in outcomes.items() if "outside_worktree" in seen)
+    if outside:
+        return f"Project imports came from outside the worktree: {', '.join(outside)}"
+    if require_all:
+        missing = sorted(name for name, seen in outcomes.items() if "in_worktree" not in seen)
+        if missing:
+            return f"Project imports were not observed: {', '.join(missing)}"
+    return None
+
+
 def baseline(adapter: PytestAdapter, task: dict, scratch: Path) -> dict:
     with worktree(Path(task["repository"]), task["commit"], scratch) as tree:
         directory = within(tree, task["cwd"])
         target = adapter.run(directory, task["targets"], tree=tree)
         if target["status"] not in VALID_TEST_RUN:
             return {"target": target, "reason": f"Target execution: {target['status']}"}
+        if problem := import_problem(target):
+            return {"target": target, "reason": problem}
         missing = [node for node in task["targets"] if status_of(target, node) != "failed"]
         if missing:
             return {"target": target, "reason": f"Failure not reproduced for: {', '.join(missing)}"}
@@ -20,7 +38,7 @@ def baseline(adapter: PytestAdapter, task: dict, scratch: Path) -> dict:
         return {
             "target": target,
             "regression": regression,
-            "reason": None if regression["status"] in VALID_TEST_RUN else
+            "reason": import_problem(target, regression, require_all=True) if regression["status"] in VALID_TEST_RUN else
             f"Regression baseline unavailable: {regression['status']}",
         }
 
@@ -49,6 +67,8 @@ def verify(adapter: PytestAdapter, task: dict, reference: dict, patch: str, scra
         except (ValueError, OSError) as error:
             return {"status": "rejected", "reason": str(error)}
         target = adapter.run(directory, task["targets"], tree=tree)
+        if target["status"] in VALID_TEST_RUN and (problem := import_problem(target)):
+            return {"status": "blocked", "reason": problem, "target": target}
         target_outcomes = {node: status_of(target, node) for node in task["targets"]}
         if target["status"] != "passed" or any(outcome != "passed" for outcome in target_outcomes.values()):
             return {
@@ -57,6 +77,8 @@ def verify(adapter: PytestAdapter, task: dict, reference: dict, patch: str, scra
             }
 
         regression = adapter.run(directory, task["regression"], tree=tree)
+        if regression["status"] in VALID_TEST_RUN and (problem := import_problem(target, regression, require_all=True)):
+            return {"status": "blocked", "reason": problem, "target": target, "regression": regression}
         baseline_collection = collected_tests(reference["regression"])
         candidate_collection = collected_tests(regression)
         missing_tests = (

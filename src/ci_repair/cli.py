@@ -34,6 +34,7 @@ def parser() -> argparse.ArgumentParser:
     subcommands = command.add_subparsers(dest="command", required=True)
     fix = subcommands.add_parser("fix", help="Start a repair task")
     add_project_arguments(fix)
+    fix.add_argument("--import", dest="imports", action="append", help="Verify a project module's runtime origin; repeatable")
     fix.add_argument("--log", help="CI log path, or - for stdin")
     fix.add_argument("--commit", help="Commit tested by CI; defaults to local HEAD")
     fix.add_argument("--test", action="append", default=[], help="Exact failed pytest node ID; repeatable")
@@ -44,7 +45,7 @@ def parser() -> argparse.ArgumentParser:
     fix.add_argument("--pause-after-candidate", action="store_true", help="Checkpoint after verifying one candidate")
     doctor = subcommands.add_parser("doctor", help="Check a project's Python environment and test plan")
     add_project_arguments(doctor)
-    doctor.add_argument("--import", dest="imports", action="append", default=[], help="Module to locate; repeatable")
+    doctor.add_argument("--import", dest="imports", action="append", help="Module to locate; repeatable")
     for name in ("status", "resume"):
         subcommands.add_parser(name).add_argument("task_id", type=UUID)
     return command
@@ -96,7 +97,7 @@ def new_state(args, log: str) -> dict:
 def project_profile(args):
     return resolve_project_profile(
         args.repo, args.config, cwd=args.cwd, python=args.python, source_paths=args.source_path,
-        regression=args.regression, timeout=args.timeout,
+        import_modules=args.imports, regression=args.regression, timeout=args.timeout,
     )
 
 
@@ -105,7 +106,7 @@ def main(argv=None) -> int:
     storage = args.state_dir.resolve()
     try:
         if args.command == "doctor":
-            diagnosis = check_project(project_profile(args), args.imports)
+            diagnosis = check_project(project_profile(args))
             print(json.dumps(diagnosis, ensure_ascii=False, indent=2))
             return 0 if diagnosis["status"] == "ready" else 2
         initial = None
