@@ -111,6 +111,8 @@ def independent_tests(case, view, folder, patch=None, image=None):
     if image:
         result = container_run(image, tree, evidence, args, folder / "pytest.log", folder / "stderr.log", 90)
         exit_code = result["exit_code"]
+        if not xml.is_file():
+            raise ValueError(f"Isolated pytest did not produce JUnit XML (exit {exit_code}): {result['output'][-1200:]}")
     else:
         run = subprocess.run([sys.executable, *args], cwd=tree, env=env, capture_output=True,
                              encoding="utf-8", errors="replace", timeout=90)
