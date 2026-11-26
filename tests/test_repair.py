@@ -286,7 +286,8 @@ def test_seeded_regression_drives_model_retry(tmp_path, monkeypatch, decision):
     captured_feedback = []
 
     class ScriptedModel:
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, *, tool_choice):
+            assert tool_choice == "required"
             return self
 
         def invoke(self, messages):
