@@ -24,6 +24,7 @@ class RepairState(TypedDict, total=False):
     history: list[dict]
     status: str
     reason: str
+    reason_code: str
 
 
 def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool = False):
@@ -74,9 +75,12 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
         try:
             reference = baseline(adapter(task), task, scratch)
         except (ValueError, OSError, subprocess.TimeoutExpired) as error:
-            return {"status": "blocked", "reason": str(error)}
+            return {"status": "blocked", "reason": str(error), "reason_code": "execution_error"}
         if reference["reason"]:
-            return {"reference": reference, "status": "blocked", "reason": reference["reason"]}
+            return {
+                "reference": reference, "status": "blocked",
+                "reason": reference["reason"], "reason_code": reference["reason_code"],
+            }
         return {"reference": reference, "status": "running"}
 
     def generate(state: RepairState):
@@ -114,7 +118,7 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
         try:
             result = verify(adapter(task), task, state["reference"], candidate["diff"], scratch)
         except (ValueError, OSError, subprocess.TimeoutExpired) as error:
-            result = {"status": "blocked", "reason": str(error)}
+            result = {"status": "blocked", "reason": str(error), "reason_code": "execution_error"}
         return {"validations": [*previous, {"candidate": len(previous) + 1, **result}]}
 
     def finish(state: RepairState):
@@ -123,8 +127,13 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
         results = state.get("validations", [])
         accepted = next((result for result in results if result["status"] == "accepted"), None)
         if not accepted:
-            status = "blocked" if any(result["status"] == "blocked" for result in results) else "rejected"
-            return {"status": status, "reason": "No candidate passed verification"}
+            blocked = next((result for result in results if result["status"] == "blocked"), None)
+            if blocked:
+                return {
+                    "status": "blocked", "reason": blocked["reason"],
+                    "reason_code": blocked.get("reason_code", "execution_error"),
+                }
+            return {"status": "rejected", "reason": "No candidate passed verification"}
         task = state["task"]
         if task["use_memory"]:
             candidate = state["candidates"][accepted["candidate"] - 1]

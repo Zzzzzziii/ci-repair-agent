@@ -4,9 +4,6 @@ import json
 from pathlib import Path
 import sys
 
-import pytest
-
-
 class Reporter:
     def __init__(self, destination: Path, modules: list[str]):
         self.destination = destination
@@ -14,7 +11,9 @@ class Reporter:
         self.collected = None
         self.phases = {}
         self.collection_errors = []
+        self.missing_dependencies = []
         self.session_finished = False
+        self.pytest_version = None
 
     def pytest_collection_finish(self, session):
         self.collected = [item.nodeid for item in session.items]
@@ -38,6 +37,19 @@ class Reporter:
         if report.failed:
             self.collection_errors.append(report.longreprtext)
 
+    def pytest_exception_interact(self, call, report):
+        error = call.excinfo.value
+        seen = set()
+        while error is not None and id(error) not in seen:
+            if isinstance(error, ModuleNotFoundError) and error.name:
+                self.record_missing_dependency(error.name, report.nodeid, call.when)
+                break
+            seen.add(id(error))
+            error = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
+
+    def record_missing_dependency(self, name: str, node_id: str | None, phase: str):
+        self.missing_dependencies.append({"module": name, "node_id": node_id, "phase": phase})
+
     def observe_imports(self):
         for name, observed in self.imports.items():
             module = sys.modules.get(name)
@@ -51,12 +63,13 @@ class Reporter:
             "collected": self.collected,
             "phases": self.phases,
             "collection_errors": self.collection_errors,
+            "missing_dependencies": self.missing_dependencies,
             "session_finished": self.session_finished,
             "imports": {name: sorted(paths) for name, paths in self.imports.items()},
             "runtime": {
                 "python": sys.executable,
                 "python_version": sys.version.split()[0],
-                "pytest_version": pytest.__version__,
+                "pytest_version": self.pytest_version,
             },
         }
         temporary = self.destination.with_suffix(".tmp")
@@ -67,6 +80,15 @@ class Reporter:
 def main():
     destination = Path(sys.argv[1])
     reporter = Reporter(destination, json.loads(sys.argv[2]))
+    try:
+        import pytest
+    except ModuleNotFoundError as error:
+        if error.name:
+            reporter.record_missing_dependency(error.name, None, "startup")
+        reporter.write_evidence()
+        print(str(error), file=sys.stderr)
+        return 1
+    reporter.pytest_version = pytest.__version__
     sys.path.insert(0, str(Path.cwd()))
     exit_code = pytest.main(
         ["-q", "-p", "no:cacheprovider", "--tb=short", f"--rootdir={Path.cwd()}", "--", *sys.argv[3:]],

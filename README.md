@@ -56,6 +56,8 @@ Agent 开始执行修复任务前，会在任务目录生成 `manifest.json`，�
 
 `collected` 列出 pytest 筛选后选中的用例，`session_finished` 表示会话结束的证据已写入。执行只完成了收集时，已选中却没有运行的用例会标为 `not_run`，即使 pytest 返回 0，Agent 也会报告 `incomplete`。验收会比较各候选与基线的收集范围，`missing_tests` 记录消失的用例，`unexecuted_tests` 记录已收集但没运行的用例。测试在收集后超时时，可以从 `pytest.json` 查看已保存的收集清单。
 
+`failure_kind` 区分业务测试失败、缺少依赖、收集错误、fixture 错误、会话中断和超时。遇到 `ModuleNotFoundError` 时，`missing_dependencies` 会记录缺少的导入名及发生阶段。测试执行无法提供可靠结果时，验收报告会标为 `blocked`，并给出 `reason_code`。基线没有复现失败时记录 `failure_not_reproduced`，可以通过 `target_outcomes` 查看用例实际是通过、跳过还是缺失。
+
 ### 暂停和记忆
 
 加 `--pause-after-candidate` 可在第一个候选验证后主动暂停。也可以在进程退出后查看已保存进度并恢复：

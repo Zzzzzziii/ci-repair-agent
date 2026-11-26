@@ -7,6 +7,13 @@ from ci_repair.workspace import apply_patch, within, worktree
 VALID_TEST_RUN = {"passed", "failed"}
 
 
+def execution_problem(run: dict, label: str) -> dict[str, str]:
+    kind = run.get("failure_kind") or run["status"]
+    modules = sorted({item["module"] for item in run.get("missing_dependencies", [])})
+    detail = f" ({', '.join(modules)})" if modules else ""
+    return {"reason_code": kind, "reason": f"{label}: {kind}{detail}"}
+
+
 def import_problem(*runs: dict, require_all: bool = False) -> str | None:
     outcomes = {}
     for run in runs:
@@ -28,19 +35,23 @@ def baseline(adapter: PytestAdapter, task: dict, scratch: Path) -> dict:
         directory = within(tree, task["cwd"])
         target = adapter.run(directory, task["targets"], tree=tree)
         if target["status"] not in VALID_TEST_RUN:
-            return {"target": target, "reason": f"Target execution: {target['status']}"}
+            return {"target": target, **execution_problem(target, "Target execution")}
         if problem := import_problem(target):
-            return {"target": target, "reason": problem}
-        missing = [node for node in task["targets"] if status_of(target, node) != "failed"]
+            return {"target": target, "reason": problem, "reason_code": "import_origin"}
+        outcomes = {node: status_of(target, node) for node in task["targets"]}
+        missing = [node for node, outcome in outcomes.items() if outcome != "failed"]
         if missing:
-            return {"target": target, "reason": f"Failure not reproduced for: {', '.join(missing)}"}
+            return {
+                "target": target, "target_outcomes": outcomes, "reason_code": "failure_not_reproduced",
+                "reason": f"Failure not reproduced for: {', '.join(missing)}",
+            }
         regression = adapter.run(directory, task["regression"], tree=tree)
-        return {
-            "target": target,
-            "regression": regression,
-            "reason": import_problem(target, regression, require_all=True) if regression["status"] in VALID_TEST_RUN else
-            f"Regression baseline unavailable: {regression['status']}",
-        }
+        reference = {"target": target, "regression": regression}
+        if regression["status"] not in VALID_TEST_RUN:
+            return {**reference, **execution_problem(regression, "Regression baseline unavailable")}
+        if problem := import_problem(target, regression, require_all=True):
+            return {**reference, "reason": problem, "reason_code": "import_origin"}
+        return {**reference, "reason": None}
 
 
 def status_of(run: dict, node: str) -> str:
@@ -67,18 +78,28 @@ def verify(adapter: PytestAdapter, task: dict, reference: dict, patch: str, scra
         except (ValueError, OSError) as error:
             return {"status": "rejected", "reason": str(error)}
         target = adapter.run(directory, task["targets"], tree=tree)
-        if target["status"] in VALID_TEST_RUN and (problem := import_problem(target)):
-            return {"status": "blocked", "reason": problem, "target": target}
+        if target["status"] not in VALID_TEST_RUN:
+            return {"status": "blocked", "target": target, **execution_problem(target, "Target execution")}
+        if problem := import_problem(target):
+            return {"status": "blocked", "reason": problem, "reason_code": "import_origin", "target": target}
         target_outcomes = {node: status_of(target, node) for node in task["targets"]}
         if target["status"] != "passed" or any(outcome != "passed" for outcome in target_outcomes.values()):
             return {
                 "status": "rejected", "reason": "Target tests did not all pass",
-                "target": target, "target_outcomes": target_outcomes,
+                "reason_code": "target_not_passed", "target": target, "target_outcomes": target_outcomes,
             }
 
         regression = adapter.run(directory, task["regression"], tree=tree)
-        if regression["status"] in VALID_TEST_RUN and (problem := import_problem(target, regression, require_all=True)):
-            return {"status": "blocked", "reason": problem, "target": target, "regression": regression}
+        if regression["status"] not in VALID_TEST_RUN:
+            return {
+                "status": "blocked", "target": target, "regression": regression,
+                **execution_problem(regression, "Regression execution"),
+            }
+        if problem := import_problem(target, regression, require_all=True):
+            return {
+                "status": "blocked", "reason": problem, "reason_code": "import_origin",
+                "target": target, "regression": regression,
+            }
         baseline_collection = collected_tests(reference["regression"])
         candidate_collection = collected_tests(regression)
         missing_tests = (
@@ -105,14 +126,12 @@ def verify(adapter: PytestAdapter, task: dict, reference: dict, patch: str, scra
             "missing_tests": missing_tests,
             "unexecuted_tests": unexecuted_tests,
         }
-        if regression["status"] not in VALID_TEST_RUN:
-            result["reason"] = f"Regression execution: {regression['status']}"
-        elif missing_tests:
-            result["reason"] = "Previously collected regression tests are missing"
+        if missing_tests:
+            result.update(reason="Previously collected regression tests are missing", reason_code="missing_tests")
         elif unexecuted_tests:
-            result["reason"] = "Collected regression tests did not run"
+            result.update(reason="Collected regression tests did not run", reason_code="unexecuted_tests")
         elif result["regressions"]:
-            result["reason"] = "New regression failures or previously passing tests did not pass"
+            result.update(reason="New regression failures or previously passing tests did not pass", reason_code="regression")
         else:
             result.update(status="accepted", diff=actual_diff)
         return result
