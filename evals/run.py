@@ -185,4 +185,8 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["real"]:
+        from real import main as real_main
+
+        sys.exit(real_main(sys.argv[2:]))
     sys.exit(main())

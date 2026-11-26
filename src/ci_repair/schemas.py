@@ -153,6 +153,7 @@ class BudgetState(TypedDict):
 
 
 class ModelCallRecord(TypedDict):
+    served_model: NotRequired[str]
     schema_version: int
     call_id: str
     task_id: str

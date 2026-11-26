@@ -17,7 +17,7 @@ from ci_repair.memory import RepairMemory
 from ci_repair.recovery import verify_checkpoint, record_resume
 from ci_repair.budget import Budget, DEFAULTS
 from ci_repair.sequential import identify
-from ci_repair.pytest_adapter import failing_nodes, normalized_node
+from ci_repair.pytest_adapter import PytestAdapter, failing_nodes, normalized_node
 from ci_repair.workflow import build_workflow
 from ci_repair.workspace import commit_id, git, repository_path
 
@@ -44,12 +44,13 @@ def parser() -> argparse.ArgumentParser:
     fix.add_argument("--commit", help="Commit tested by CI; defaults to local HEAD")
     fix.add_argument("--test", action="append", default=[], help="Exact failed pytest node ID; repeatable")
     fix.add_argument("--model", default=os.environ.get("CI_REPAIR_MODEL"), help="LangChain provider:model identifier")
-    fix.add_argument("--retrieval", choices=["literal", "bm25", "hybrid"], default="bm25",
+    fix.add_argument("--retrieval", choices=["none", "literal", "bm25", "hybrid"], default="bm25",
                      help="Source retrieval strategy for model repair")
     fix.add_argument("--embedding-model", default=os.environ.get("CI_REPAIR_EMBEDDING_MODEL"),
                      help="LangChain provider:model identifier for explicit hybrid retrieval")
     fix.add_argument("--strategy", choices=["batch", "sequential"], help="Defaults to batch, or sequential for --seed-patch")
     fix.add_argument("--no-memory", action="store_true")
+    fix.add_argument("--no-retry-feedback", action="store_true", help="Omit previous test feedback from sequential model prompts")
     for kind in DEFAULTS:
         fix.add_argument("--max-" + kind.replace("_", "-"), dest="max_" + kind, type=int,
                          help=f"Sequential repair budget for {kind} (default {DEFAULTS[kind]})")
@@ -100,6 +101,8 @@ def new_state(args, log: str) -> dict:
     if not args.patch and args.retrieval == "hybrid" and not embedding_model:
         raise ValueError("Hybrid retrieval requires --embedding-model provider:model")
     strategy = args.strategy or ("sequential" if args.seed_patch else "batch")
+    if (args.no_retry_feedback or args.retrieval == "none") and (strategy != "sequential" or args.patch):
+        raise ValueError("Tool-only retrieval and feedback ablations require model-driven sequential repair")
     if args.seed_patch and strategy != "sequential":
         raise ValueError("--seed-patch requires sequential repair")
     initial_patches = [args.seed_patch] if args.seed_patch else args.patch
@@ -132,6 +135,7 @@ def new_state(args, log: str) -> dict:
             "limits": {**DEFAULTS, **{k: v for k, v in limits.items() if v is not None}}
                       if strategy == "sequential" and not args.patch else None,
             "use_memory": not args.no_memory,
+            "use_retry_feedback": not args.no_retry_feedback,
         },
         "candidates": candidates,
         "status": "running",
@@ -145,7 +149,7 @@ def project_profile(args):
     )
 
 
-def main(argv=None) -> int:
+def main(argv=None, *, adapter_factory=PytestAdapter) -> int:
     args = parser().parse_args(argv)
     storage = args.state_dir.resolve()
     try:
@@ -195,7 +199,8 @@ def main(argv=None) -> int:
         with SqliteSaver.from_conn_string(str(database)) as saver:
             relocation = repository_path(args.repo) if args.command == "resume" and args.repo else None
             graph = build_workflow(saver, storage, pause_after_candidate=getattr(args, "pause_after_candidate", False),
-                                   relocated_repo=relocation, config_override=args.config if args.command == "resume" else None)
+                                   relocated_repo=relocation, config_override=args.config if args.command == "resume" else None,
+                                   adapter_factory=adapter_factory)
             snapshot = graph.get_state(config)
             if initial is None and not snapshot.values:
                 raise ValueError(f"Unknown task: {task_id}")

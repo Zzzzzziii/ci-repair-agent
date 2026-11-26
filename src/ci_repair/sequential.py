@@ -33,6 +33,8 @@ def register_sequential(graph, record_node, storage, memory, adapter):
 
     def tools_for(task):
         repo = Path(task["repository"])
+        if task.get("retrieval_mode") == "none":
+            return repository_tools(repo, task["commit"])
         cache = storage / "retrieval"
 
         def retrieve(text, limit):
@@ -49,12 +51,14 @@ def register_sequential(graph, record_node, storage, memory, adapter):
         output = state["reference"]["target"]["output"]
         query = failure_query(task["targets"], output)
         history = memory.search(task["repository_key"], query, exclude_task=task["id"]) if task["use_memory"] else []
-        search = model.code_retriever(Path(task["repository"]), task, storage / "retrieval",
-                                      directory(task), model.configured_secrets())
-        context = search(query, 6, purpose="initial")["context"]
+        context = []
+        if task.get("retrieval_mode") != "none":
+            search = model.code_retriever(Path(task["repository"]), task, storage / "retrieval",
+                                          directory(task), model.configured_secrets())
+            context = search(query, 6, purpose="initial")["context"]
         feedback = [build_feedback(candidate, validation, task["targets"])
                     for candidate, validation in zip(state.get("candidates", []), state.get("validations", []))
-                    if validation["status"] == "rejected"]
+                    if validation["status"] == "rejected" and task.get("use_retry_feedback", True)]
         prompt = (f"Failed commit: {task['commit']}\nTargets: {task['targets']}\n{output[-12000:]}\n"
                   f"Historical attempts and their observed outcomes (recheck applicability): {history}\nRetrieved code: {json.dumps(context, ensure_ascii=False)}\n"
                   f"Rejected attempts in this task: {json.dumps(feedback, ensure_ascii=False)}")

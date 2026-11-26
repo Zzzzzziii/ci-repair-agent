@@ -54,6 +54,10 @@ def run_model_step(request, purpose: ModelCallPurpose, task: dict, task_director
     else:
         if purpose != "initialize":
             reply = result.get("raw") if purpose == "propose" else result
+            metadata = getattr(reply, "response_metadata", {}) or {}
+            served_model = metadata.get("model_name") or metadata.get("model")
+            if isinstance(served_model, str):
+                record["served_model"] = served_model
             usage = getattr(reply, "usage_metadata", None)
             if usage is not None:
                 record["usage"] = {
