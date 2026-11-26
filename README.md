@@ -23,6 +23,17 @@ uv run ci-repair fix --repo D:\checkout-service --test 'tests/test_checkout.py::
 - `--cwd` 指定相对仓库的测试根目录。测试选择器也相对于这个目录。默认回归范围是该目录按项目配置发现的测试套件，可用可重复的 `--regression` 缩小范围。
 - `--strategy batch` 一次生成最多两个候选，默认启用。`--strategy sequential` 先验证一个候选，失败后把测试反馈交给模型再试一次。
 - `--patch` 可重复传入一或两份现成 diff，走相同验收流程，无需模型密钥。
+- `--seed-patch` 用一份指定的 diff 作为顺序修复的首个候选。首个候选被拒后，模型可依据反馈提出第二份补丁。此模式需要配置模型。
+
+### 复现一次回归后重试
+
+在 CI Repair Agent 仓库根目录运行以下命令。预置补丁会让普通地区的免运费测试通过，同时把偏远地区运费错误地降为 0 元。Agent 会把失败断言、堆栈和候选改动交给已配置的模型，新候选要重新通过目标与回归测试。
+
+```powershell
+uv run ci-repair --state-dir .ci-repair/feedback-demo fix --repo . --test 'examples/shipping/test_shipping.py::test_standard_shipping_at_threshold_is_free' --regression examples/shipping --seed-patch evals/fixtures/shipping-regression.diff
+```
+
+`report.json` 的 `retry_feedback` 指向实际提交给模型的有界反馈，`validations` 保留每份候选的测试结果。反馈中的测试产物路径可用于查看原始断言和日志。
 
 ### 接入自己的项目
 

@@ -6,7 +6,8 @@ from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
 
-from ci_repair.artifacts import append_workflow_event
+from ci_repair.artifacts import append_workflow_event, record_retry_feedback
+from ci_repair.feedback import build_feedback
 from ci_repair.memory import RepairMemory
 from ci_repair.model import propose
 from ci_repair.pytest_adapter import PytestAdapter
@@ -86,19 +87,17 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
         history = memory.search(task["repository_key"], query) if task["use_memory"] else []
         candidates = state.get("candidates", [])
         feedback = [
-            {
-                "hypothesis": candidate["hypothesis"],
-                "diff": candidate["diff"][:5000],
-                "reason": result.get("reason"),
-                "regressions": result.get("regressions", []),
-                "test_output": result.get("target", {}).get("output", "")[-2000:],
-            }
+            build_feedback(candidate, result, task["targets"])
             for candidate, result in zip(candidates, state.get("validations", []))
+            if result["status"] == "rejected"
         ]
+        task_directory = storage / "runs" / task["id"]
         with worktree(Path(task["repository"]), task["commit"], scratch) as tree:
+            if feedback:
+                record_retry_feedback(task_directory, feedback)
             proposal = propose(
                 task["model"], tree, task, output, history, feedback,
-                task_directory=storage / "runs" / task["id"],
+                task_directory=task_directory,
             )
         return {
             "candidates": [*candidates, *proposal["candidates"]],

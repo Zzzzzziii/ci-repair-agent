@@ -1,0 +1,9 @@
+diff --git a/examples/shipping/shipping.py b/examples/shipping/shipping.py
+--- a/examples/shipping/shipping.py
++++ b/examples/shipping/shipping.py
+@@ -9,3 +9,5 @@
+ def shipping_fee(subtotal: Decimal, *, remote_area: bool = False) -> Decimal:
++    if subtotal == FREE_SHIPPING_THRESHOLD:
++        return Decimal("0")
+     if remote_area:
+         return REMOTE_SHIPPING_FEE
