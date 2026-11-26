@@ -5,13 +5,46 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from hashlib import sha256
+import re
+import sqlite3
+from contextlib import closing
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 from ci_repair.schemas import ProjectProfile
-from ci_repair.workspace import repository_path, within
+from ci_repair.workspace import git, repository_path, within
 
 
 DEFAULT_CONFIG = ".ci-repair.toml"
-CONFIG_KEYS = {"cwd", "python", "source_paths", "import_modules", "pytest_args", "regression", "timeout", "embedding_model"}
+CONFIG_KEYS = {"cwd", "python", "source_paths", "import_modules", "pytest_args", "regression", "timeout", "embedding_model", "repo_id"}
+
+
+def repository_id(repository: Path, explicit: str | None = None) -> str:
+    if explicit:
+        return "project:" + explicit
+    remotes = git(repository, "remote").splitlines()
+    remote = "origin" if "origin" in remotes else remotes[0] if len(remotes) == 1 else None
+    if remote:
+        raw = git(repository, "remote", "get-url", remote).strip()
+        scp = re.fullmatch(r"(?:[^/@:]+@)?([^/:]+):(.+)", raw)
+        if "://" not in raw and scp and len(scp[1]) > 1:
+            raw = f"ssh://{scp[1]}/{scp[2]}"
+        url = urlsplit(raw)
+        if url.hostname and url.scheme in {"https", "http", "ssh", "git"}:
+            port = url.port
+            default = {"https": 443, "http": 80, "ssh": 22, "git": 9418}[url.scheme]
+            host = url.hostname.lower() + (f":{port}" if port and port != default else "")
+            identity = host + "/" + url.path.strip("/").removesuffix(".git")
+            return "remote:" + sha256(identity.encode()).hexdigest()
+    common = Path(git(repository, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    with closing(sqlite3.connect(common / "ci-repair-id.sqlite", timeout=30)) as db, db:
+        db.execute("CREATE TABLE IF NOT EXISTS identity (slot INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+        row = db.execute("SELECT value FROM identity WHERE slot=1").fetchone()
+        if row is None:
+            db.execute("INSERT OR IGNORE INTO identity VALUES(1, ?)", (str(uuid4()),))
+            row = db.execute("SELECT value FROM identity WHERE slot=1").fetchone()
+        return "local:" + row[0]
 PROJECT_PROBE = """
 import sys
 if sys.path and sys.path[0] == "":
@@ -49,7 +82,7 @@ def load_project_config(repository: Path, config: Path | None) -> tuple[Path | N
 
     if unknown := sorted(settings.keys() - CONFIG_KEYS):
         raise ValueError(f"Unknown project settings in {path}: {', '.join(unknown)}")
-    for key in ("cwd", "python", "embedding_model"):
+    for key in ("cwd", "python", "embedding_model", "repo_id"):
         if key in settings and (not isinstance(settings[key], str) or not settings[key].strip()):
             raise ValueError(f"{key} in {path} must be a nonempty string")
     for key in ("source_paths", "import_modules", "pytest_args", "regression"):
@@ -111,6 +144,7 @@ def resolve_project_profile(
         raise ValueError("--timeout must be a positive finite number")
     return {
         "repository": str(repository),
+        "explicit_repo_id": settings.get("repo_id"),
         "project_config": str(config_path) if config_path is not None else None,
         "cwd": directory.relative_to(repository).as_posix(),
         "python": str(Path(executable).absolute()),

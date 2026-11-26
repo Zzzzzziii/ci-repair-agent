@@ -2,6 +2,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
@@ -29,6 +30,15 @@ def atomic_write(path: Path, content: bytes) -> None:
 
 def write_json(path: Path, data: Mapping[str, object]) -> None:
     atomic_write(path, json.dumps(dict(data), ensure_ascii=False, indent=2).encode("utf-8"))
+
+
+def read_report(path: Path) -> dict:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("schema_version", 1) not in (1, 2):
+        raise ValueError("Unsupported repair report version")
+    if not isinstance(data.get("task"), dict) or not data["task"].get("id"):
+        raise ValueError("Missing task identity in repair report")
+    return {"recovery": [], **data, "schema_version": 2}
 
 
 def record_run_inputs(directory: Path, task: dict, log: bytes | None) -> None:
@@ -59,6 +69,7 @@ def record_run_inputs(directory: Path, task: dict, log: bytes | None) -> None:
         "retrieval_mode": task.get("retrieval_mode"),
         "embedding_model": task.get("embedding_model"),
         "input_log": input_log,
+        "input_sha256": sha256(log).hexdigest() if log is not None else None,
     }
     write_json(directory / MANIFEST_FILENAME, manifest)
 
@@ -124,7 +135,7 @@ def record_candidate_diffs(directory: Path, candidates: list[dict]) -> list[dict
 
 
 def publish(directory: Path, state: dict, next_nodes: tuple, *, status: str, error: str | None = None) -> None:
-    report = {**state, "status": status, "next": list(next_nodes)}
+    report = {**state, "schema_version": 2, "status": status, "next": list(next_nodes)}
     manifest_path = directory / MANIFEST_FILENAME
     if manifest_path.is_file():
         report["manifest"] = MANIFEST_FILENAME
@@ -146,6 +157,7 @@ def publish(directory: Path, state: dict, next_nodes: tuple, *, status: str, err
         ("model_calls", MODEL_ARTIFACTS), ("tool_events", TOOL_ARTIFACTS),
         ("retry_feedback", FEEDBACK_ARTIFACTS), ("worktrees", WORKTREE_ARTIFACTS),
         ("retrieval", RETRIEVAL_ARTIFACTS),
+        ("recovery", Path("artifacts/recovery")),
     ):
         paths = sorted(
             path.relative_to(directory).as_posix()

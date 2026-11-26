@@ -32,6 +32,10 @@ class Budget:
                     if call["status"] != "running":
                         entry.update(usage=call["usage"], status=call["status"])
                         changed = True
+                        continue
+                if entry.get("status") != "outcome_unknown":
+                    entry["status"] = "outcome_unknown"
+                    changed = True
             if changed:
                 write_json(self.path, self.state)
         else:
@@ -43,6 +47,28 @@ class Budget:
         if remaining <= 0:
             raise BudgetExhausted("seconds")
         return remaining
+
+    def reconcile(self, state):
+        if self.state["limits"] != state["task"]["limits"]:
+            raise ValueError("Budget limits differ from the checkpoint")
+        directory = self.path.parent
+        entries = self.state["reservations"]
+        for path in (directory / "artifacts/model").glob("*.json"):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if record["purpose"] == "decision":
+                entries.setdefault("model_calls", {})[path.stem] = {
+                    "usage": record["usage"], "status": "outcome_unknown" if record["status"] == "running" else record["status"]}
+        for path in (directory / "artifacts/tools").glob("*.json"):
+            event = json.loads(path.read_text(encoding="utf-8"))
+            entries.setdefault("tool_calls", {})[path.stem] = {
+                "usage": None, "status": "outcome_unknown" if event["status"] == "running" else event["status"]}
+        for run in (directory / "artifacts/pytest").glob("*"):
+            if run.is_dir() and (run.name in entries.get("tests", {}) or (run / "stdout.log").is_file()):
+                entries.setdefault("tests", {}).setdefault(run.name, {"usage": None})
+        for result in state.get("validations", []):
+            if identifier := result.get("candidate_id"):
+                entries.setdefault("candidates", {}).setdefault(identifier, {"usage": None})
+        write_json(self.path, self.state)
 
     def reserve_call(self, kind, identifier=None):
         self.check_budget()

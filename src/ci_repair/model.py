@@ -253,7 +253,7 @@ def propose(model_name: str, tree: Path, task: dict, failure: str, history: list
         )),
         HumanMessage(content=(
             f"Failed commit: {task['commit']}\nTests: {task['targets']}\n"
-            f"Observed failure:\n{failure[:12000]}\nRelated verified historical repairs: {history}\n"
+            f"Observed failure:\n{failure[:12000]}\nHistorical attempts and outcomes (recheck applicability): {history}\n"
             f"Rejected attempts in this task: {json.dumps(feedback, ensure_ascii=False)}"
         )),
     ]

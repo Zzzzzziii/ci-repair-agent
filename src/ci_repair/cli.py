@@ -11,13 +11,15 @@ from uuid import UUID, uuid4
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from ci_repair.artifacts import append_workflow_event, publish, record_run_inputs
-from ci_repair.project import check_project, resolve_project_profile, validate_selector
+from ci_repair.artifacts import append_workflow_event, publish, read_report, record_run_inputs, write_json
+from ci_repair.project import check_project, resolve_project_profile, validate_selector, repository_id, load_project_config
+from ci_repair.memory import RepairMemory
+from ci_repair.recovery import verify_checkpoint, record_resume
 from ci_repair.budget import Budget, DEFAULTS
 from ci_repair.sequential import identify
 from ci_repair.pytest_adapter import failing_nodes, normalized_node
 from ci_repair.workflow import build_workflow
-from ci_repair.workspace import commit_id, repository_key
+from ci_repair.workspace import commit_id, git, repository_path
 
 
 def add_project_arguments(command: argparse.ArgumentParser) -> None:
@@ -59,7 +61,16 @@ def parser() -> argparse.ArgumentParser:
     add_project_arguments(doctor)
     doctor.add_argument("--import", dest="imports", action="append", help="Module to locate; repeatable")
     for name in ("status", "resume"):
-        subcommands.add_parser(name).add_argument("task_id", type=UUID)
+        sub = subcommands.add_parser(name)
+        sub.add_argument("task_id", type=UUID)
+        if name == "resume":
+            sub.add_argument("--repo", type=Path, help="New location of the same repository")
+            sub.add_argument("--config", type=Path, help="Project config at its current location")
+    memory = subcommands.add_parser("memory", help="Inspect or manage stored repair experiences")
+    memory.add_argument("action", choices=["list", "show", "disable", "delete"])
+    memory.add_argument("experience_id", nargs="?")
+    memory.add_argument("--repo", type=Path, required=True)
+    memory.add_argument("--config", type=Path)
     return command
 
 
@@ -109,7 +120,8 @@ def new_state(args, log: str) -> dict:
         "task": {
             **profile,
             "id": str(uuid4()),
-            "repository_key": repository_key(repository),
+            "data_version": 2,
+            "repository_key": repository_id(repository, profile.get("explicit_repo_id")),
             "commit": commit,
             "commit_source": "argument" if args.commit else "CI log" if log_commit else "local HEAD",
             "targets": targets,
@@ -137,6 +149,27 @@ def main(argv=None) -> int:
     args = parser().parse_args(argv)
     storage = args.state_dir.resolve()
     try:
+        if args.command == "memory":
+            repo = repository_path(args.repo)
+            _, settings = load_project_config(repo, args.config)
+            key = repository_id(repo, settings.get("repo_id"))
+            memory = RepairMemory(storage / "repairs.sqlite")
+            legacy = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+            memory.adopt_legacy(key, os.path.normcase(str(legacy)), repo)
+            if args.action != "list" and not args.experience_id:
+                raise ValueError("Supply the experience ID from memory list")
+            if args.action in ("disable", "delete"):
+                memory.invalidate(key, args.experience_id, delete=args.action == "delete")
+            else:
+                rows = memory.list_experiences(key)
+                for item in rows:
+                    item["source_available"] = memory.source_exists(item)
+                if args.action == "show":
+                    rows = next((item for item in rows if item["id"] == args.experience_id), None)
+                    if rows is None:
+                        raise ValueError("Experience not found in this repository")
+                print(json.dumps(rows, ensure_ascii=False, indent=2))
+            return 0
         if args.command == "doctor":
             diagnosis = check_project(project_profile(args))
             print(json.dumps(diagnosis, ensure_ascii=False, indent=2))
@@ -147,6 +180,11 @@ def main(argv=None) -> int:
             input_log = read_ci_log(args.log)
             log = (input_log or b"").decode("utf-8-sig", errors="replace")
             initial = new_state(args, log.replace("\r\n", "\n").replace("\r", "\n"))
+            if initial["task"]["use_memory"] and (storage / "repairs.sqlite").is_file():
+                task = initial["task"]
+                repo = Path(task["repository"])
+                legacy = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+                RepairMemory(storage / "repairs.sqlite").adopt_legacy(task["repository_key"], os.path.normcase(str(legacy)), repo)
         task_id = initial["task"]["id"] if initial else str(args.task_id)
         directory = storage / "runs" / task_id
         database = storage / "checkpoints.sqlite"
@@ -155,14 +193,33 @@ def main(argv=None) -> int:
         storage.mkdir(parents=True, exist_ok=True)
         config = {"configurable": {"thread_id": task_id}, "recursion_limit": 100000}
         with SqliteSaver.from_conn_string(str(database)) as saver:
-            graph = build_workflow(saver, storage, pause_after_candidate=getattr(args, "pause_after_candidate", False))
+            relocation = repository_path(args.repo) if args.command == "resume" and args.repo else None
+            graph = build_workflow(saver, storage, pause_after_candidate=getattr(args, "pause_after_candidate", False),
+                                   relocated_repo=relocation, config_override=args.config if args.command == "resume" else None)
             snapshot = graph.get_state(config)
             if initial is None and not snapshot.values:
                 raise ValueError(f"Unknown task: {task_id}")
             if args.command == "status":
+                state = snapshot.values
+                status = state["status"]
+                if snapshot.next:
+                    status = "interrupted"
+                    with closing(sqlite3.connect(directory / "lock.sqlite", timeout=0)) as probe:
+                        try:
+                            probe.execute("BEGIN IMMEDIATE")
+                        except sqlite3.OperationalError as failure:
+                            if failure.sqlite_errorcode != sqlite3.SQLITE_BUSY:
+                                raise
+                            status = "running"
+                        else:
+                            events = directory / "events.jsonl"
+                            if events.is_file() and json.loads(events.read_text(encoding="utf-8").splitlines()[-1])["event"] == "task_paused":
+                                status = "paused"
                 print(json.dumps({
                     "task_id": task_id,
-                    "status": "paused" if snapshot.next else snapshot.values["status"],
+                    "status": status, "commit": state["task"]["commit"],
+                    "completed_candidates": len(state.get("validations", [])),
+                    "checkpoint": snapshot.config["configurable"]["checkpoint_id"],
                     "next": list(snapshot.next),
                     "report": str(directory / "report.json"),
                 }))
@@ -183,8 +240,29 @@ def main(argv=None) -> int:
                 error = None
                 should_run = initial is not None or bool(snapshot.next)
                 if should_run:
+                    details = {}
+                    if initial is None:
+                        state = snapshot.values
+                        repo = relocation or Path(state["task"]["repository"])
+                        checkpoint = snapshot.config["configurable"]["checkpoint_id"]
+                        try:
+                            verify_checkpoint(directory, state, relocation, args.config)
+                            if state["task"].get("limits"):
+                                Budget(directory, state["task"]["limits"]).reconcile(state)
+                        except (ValueError, OSError, subprocess.TimeoutExpired) as failure:
+                            artifact = record_resume(directory, state, snapshot.next, checkpoint, repo, str(failure))
+                            previous = directory / "report.json"
+                            report = read_report(previous) if previous.is_file() else {"schema_version": 2, **state}
+                            write_json(previous, {**report, "status": "interrupted", "reason_code": "resume_check_failed",
+                                                  "reason": str(failure), "next": list(snapshot.next),
+                                                  "recovery": [*report.get("recovery", []), artifact]})
+                            append_workflow_event(directory, task_id, "task_interrupted", recovery=artifact, next=list(snapshot.next))
+                            print(f"Resume check failed: {failure}", file=sys.stderr)
+                            return 2
+                        details["recovery"] = record_resume(directory, state, snapshot.next, checkpoint, repo)
+                        print(f"Resuming {', '.join(snapshot.next)} after {len(state.get('validations', []))} completed candidates")
                     append_workflow_event(
-                        directory, task_id, "task_started" if initial is not None else "task_resumed",
+                        directory, task_id, "task_started" if initial is not None else "task_resumed", **details,
                     )
                     try:
                         graph.invoke(initial, config, durability="sync")

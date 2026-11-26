@@ -622,9 +622,10 @@ def test_resume_blocks_when_pytest_environment_changes(tmp_path, monkeypatch):
     resumed = cli(storage, "resume", report["task"]["id"])
     assert resumed.returncode == 2, resumed.stdout + resumed.stderr
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert report["status"] == "blocked"
-    assert report["reason_code"] == "environment_changed"
-    assert report["validations"][1]["target"]["status"] == "passed"
+    assert report["status"] == "interrupted"
+    assert report["reason_code"] == "resume_check_failed"
+    assert "environment_changed" in report["reason"]
+    assert len(report["validations"]) == 1
     assert not report_path.with_name("fix.diff").exists()
 
 
