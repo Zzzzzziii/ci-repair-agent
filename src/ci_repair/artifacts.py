@@ -134,6 +134,53 @@ def record_candidate_diffs(directory: Path, candidates: list[dict]) -> list[dict
     return records
 
 
+def render_markdown_report(report: dict) -> str:
+    task = report.get("task", {})
+    lines = ["# CI 修复报告", ""]
+
+    def field(label, value):
+        # Keep repository and model text inside indented code, including embedded newlines.
+        text = " ".join(str(value).splitlines())
+        lines.extend([f"    {label}  {text}", ""])
+
+    if task.get("id"):
+        field("任务", task["id"])
+    field("结果", report["status"])
+    if task:
+        field("被测提交", task.get("commit", "未记录"))
+        field("目标", ", ".join(task.get("targets", [])))
+        field("回归范围", ", ".join(task.get("regression", [])) or "pytest 默认收集范围")
+    if report.get("reason"):
+        field("原因", report["reason"])
+    for check in report.get("validations", []):
+        number = check["candidate"]
+        candidate = report["candidates"][number - 1]
+        lines.extend([f"## 候选 {number}", ""])
+        field("判定", check["status"])
+        field("修改理由", candidate.get("hypothesis", ""))
+        field("源码证据", ", ".join(candidate.get("evidence", [])) or "未提供")
+        if check.get("reason"):
+            field("判定原因", check["reason"])
+        if run := check.get("regression"):
+            field("已收集的回归用例数", len(run.get("tests", {})))
+            field("剩余失败", ", ".join(check.get("remaining_failures", [])) or "无记录")
+        if check.get("candidate_diff"):
+            field("候选补丁", check["candidate_diff"])
+    if budget := report.get("budget"):
+        lines.extend(["## 预算用量", ""])
+        for kind in ("model_calls", "tool_calls", "candidates", "tests"):
+            field(kind, f"{len(budget['reservations'].get(kind, {}))} / {budget['limits'][kind]}")
+    if report["status"] == "accepted":
+        lines.extend(["[下载已验证补丁](fix.diff)", ""])
+    lines.extend(["[查看完整证据](report.json)", ""])
+    return "\n".join(lines)
+
+
+def write_report(directory: Path, report: dict) -> None:
+    atomic_write(directory / "report.md", render_markdown_report(report).encode("utf-8"))
+    write_json(directory / "report.json", report)
+
+
 def publish(directory: Path, state: dict, next_nodes: tuple, *, status: str, error: str | None = None) -> None:
     report = {**state, "schema_version": 2, "status": status, "next": list(next_nodes)}
     manifest_path = directory / MANIFEST_FILENAME
@@ -186,7 +233,7 @@ def publish(directory: Path, state: dict, next_nodes: tuple, *, status: str, err
     if status == "accepted":
         accepted = next(item for item in state["validations"] if item["status"] == "accepted")
         atomic_write(directory / "fix.diff", accepted["diff"].encode("utf-8"))
-    write_json(directory / "report.json", report)
+    write_report(directory, report)
     print(f"{status}: {directory / 'report.json'}")
 
 

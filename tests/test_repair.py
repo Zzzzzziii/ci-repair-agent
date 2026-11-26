@@ -46,6 +46,32 @@ def read_timeline(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+def test_ci_reuse_outputs_and_sha(tmp_path):
+    repo = tmp_path / "shipping"
+    make_repository(repo, PROJECT / "examples/shipping")
+    sha = git(repo, "rev-parse", "HEAD").strip()
+    patch = tmp_path / "shipping.diff"
+    source = (repo / "shipping.py").read_text(encoding="utf-8")
+    create_patch(repo, "shipping.py", source.replace("> FREE_SHIPPING_THRESHOLD", ">= FREE_SHIPPING_THRESHOLD"), patch)
+    node = "test_shipping.py::test_standard_shipping_at_threshold_is_free"
+    log = tmp_path / "ci.log"
+    log.write_text(f"GITHUB_SHA={sha}\nFAILED {node}\n", encoding="utf-8")
+    receipt = tmp_path / "receipt.json"
+    args = ["--state-dir", str(tmp_path / "state"), "--result-file", str(receipt), "fix", "--repo", str(repo),
+            "--reuse-task", "--commit", sha, "--log", str(log), "--patch", str(patch), "--regression", "test_shipping.py"]
+    assert main(args) == 0
+    info = json.loads(receipt.read_text())
+    report = json.loads(Path(info["report"]).read_text(encoding="utf-8"))
+    markdown = Path(info["markdown"]).read_text(encoding="utf-8")
+    assert report["status"] == "accepted" and sha in markdown and node in markdown
+    events = Path(info["directory"]) / "events.jsonl"
+    before = events.read_bytes()
+    assert main(args) == 0 and events.read_bytes() == before
+    assert json.loads(receipt.read_text())["task_id"] == info["task_id"]
+    log.write_text(f"GITHUB_SHA={'0' * 40}\nFAILED {node}\n", encoding="utf-8")
+    assert main(args) == 2
+
+
 def test_reports_real_execution_states(tmp_path, monkeypatch):
     sample = tmp_path / "test_status.py"
     sample.write_text(

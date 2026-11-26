@@ -158,7 +158,8 @@ def resolve_project_profile(
 
 
 def prepare_candidate_environment(repository: Path, source_paths: list[str]) -> dict[str, str] | None:
-    if not source_paths:
+    action = os.environ.get("CI_REPAIR_ACTION") == "1"
+    if not source_paths and not action:
         return None
     roots = [within(repository, path) for path in source_paths]
     for root in roots:
@@ -167,6 +168,10 @@ def prepare_candidate_environment(repository: Path, source_paths: list[str]) -> 
         if os.pathsep in str(root):
             raise ValueError(f"Source path contains the PYTHONPATH separator: {root}")
     env = os.environ.copy()
+    if action:
+        for key in ("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "API_KEY",
+                    "GITHUB_TOKEN", "GH_TOKEN", "ACTIONS_RUNTIME_TOKEN"):
+            env.pop(key, None)
     paths = list(map(str, roots))
     if previous := env.get("PYTHONPATH"):
         paths.append(previous)

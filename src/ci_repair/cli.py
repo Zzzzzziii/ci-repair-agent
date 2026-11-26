@@ -1,4 +1,5 @@
 import argparse
+from hashlib import sha256
 from contextlib import closing
 import json
 import os
@@ -7,11 +8,11 @@ import re
 import sqlite3
 import subprocess
 import sys
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from ci_repair.artifacts import append_workflow_event, publish, read_report, record_run_inputs, write_json
+from ci_repair.artifacts import append_workflow_event, publish, read_report, record_run_inputs, write_json, write_report
 from ci_repair.project import check_project, resolve_project_profile, validate_selector, repository_id, load_project_config
 from ci_repair.memory import RepairMemory
 from ci_repair.recovery import verify_checkpoint, record_resume
@@ -36,6 +37,7 @@ def add_project_arguments(command: argparse.ArgumentParser) -> None:
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(description="Reproduce, repair, and verify pytest failures")
     command.add_argument("--state-dir", type=Path, default=Path.home() / ".ci-repair")
+    command.add_argument("--result-file", type=Path, help="Write the task ID and report paths as JSON for CI")
     subcommands = command.add_subparsers(dest="command", required=True)
     fix = subcommands.add_parser("fix", help="Start a repair task")
     add_project_arguments(fix)
@@ -58,6 +60,7 @@ def parser() -> argparse.ArgumentParser:
     patches.add_argument("--patch", type=Path, action="append", default=[], help="Verify a supplied diff without a model")
     patches.add_argument("--seed-patch", type=Path, help="Verify this first diff before a sequential model retry")
     fix.add_argument("--pause-after-candidate", action="store_true", help="Checkpoint after verifying one candidate")
+    fix.add_argument("--reuse-task", action="store_true", help="Resume or reuse the same CI repair in this state directory")
     doctor = subcommands.add_parser("doctor", help="Check a project's Python environment and test plan")
     add_project_arguments(doctor)
     doctor.add_argument("--import", dest="imports", action="append", help="Module to locate; repeatable")
@@ -87,8 +90,11 @@ def new_state(args, log: str) -> dict:
     profile = project_profile(args)
     repository = Path(profile["repository"])
     targets = list(dict.fromkeys(normalized_node(node) for node in (args.test or failing_nodes(log))))
-    log_commit = re.search(r"^(?:GITHUB_SHA=|commit:[ \t]*)([0-9a-fA-F]{40})[ \t]*$", log, re.MULTILINE)
-    ref = args.commit or (log_commit[1] if log_commit else "HEAD")
+    markers = set(re.findall(r"^(?:GITHUB_SHA=|commit:[ \t]*)([0-9a-fA-F]{40})[ \t]*$", log, re.MULTILINE))
+    if len({s.lower() for s in markers}) > 1:
+        raise ValueError("Conflicting tested commits in the CI log")
+    log_commit = next(iter(markers), None)
+    ref = args.commit or log_commit or "HEAD"
     for node in targets:
         validate_selector(repository / profile["cwd"], node)
     if not targets or any("::" not in node for node in targets):
@@ -112,6 +118,8 @@ def new_state(args, log: str) -> dict:
     if any(value is not None and value < 0 for value in limits.values()):
         raise ValueError("Repair budgets must be nonnegative")
     commit = commit_id(repository, ref)
+    if log_commit and log_commit.lower() != commit:
+        raise ValueError("The requested commit differs from the tested SHA in the CI log")
     candidates = [
         {"hypothesis": f"Supplied patch {patch.name}", "evidence": [],
          "diff": patch.read_text(encoding="utf-8-sig")}
@@ -149,6 +157,17 @@ def project_profile(args):
     )
 
 
+def ci_task_id(initial):
+    task = initial["task"]
+    identity = {k: v for k, v in task.items() if k not in
+                {"id", "commit_source", "repository", "project_config", "targets"}}
+    identity["targets"] = sorted(task["targets"])
+    identity["initial_patches"] = [c["diff"] for c in initial["candidates"]]
+    if path := task.get("project_config"):
+        identity["config_sha256"] = sha256(Path(path).read_bytes()).hexdigest()
+    return str(uuid5(NAMESPACE_URL, json.dumps(identity, sort_keys=True, ensure_ascii=False)))
+
+
 def main(argv=None, *, adapter_factory=PytestAdapter) -> int:
     args = parser().parse_args(argv)
     storage = args.state_dir.resolve()
@@ -184,6 +203,8 @@ def main(argv=None, *, adapter_factory=PytestAdapter) -> int:
             input_log = read_ci_log(args.log)
             log = (input_log or b"").decode("utf-8-sig", errors="replace")
             initial = new_state(args, log.replace("\r\n", "\n").replace("\r", "\n"))
+            if args.reuse_task:
+                initial["task"]["id"] = ci_task_id(initial)
             if initial["task"]["use_memory"] and (storage / "repairs.sqlite").is_file():
                 task = initial["task"]
                 repo = Path(task["repository"])
@@ -197,7 +218,8 @@ def main(argv=None, *, adapter_factory=PytestAdapter) -> int:
         storage.mkdir(parents=True, exist_ok=True)
         config = {"configurable": {"thread_id": task_id}, "recursion_limit": 100000}
         with SqliteSaver.from_conn_string(str(database)) as saver:
-            relocation = repository_path(args.repo) if args.command == "resume" and args.repo else None
+            reusable = args.command == "fix" and args.reuse_task
+            relocation = repository_path(args.repo) if (reusable or args.command == "resume") and args.repo else None
             graph = build_workflow(saver, storage, pause_after_candidate=getattr(args, "pause_after_candidate", False),
                                    relocated_repo=relocation, config_override=args.config if args.command == "resume" else None,
                                    adapter_factory=adapter_factory)
@@ -239,7 +261,14 @@ def main(argv=None, *, adapter_factory=PytestAdapter) -> int:
                         raise ValueError(f"Task is already running: {task_id}") from failure
                     raise
                 snapshot = graph.get_state(config)
+                if reusable and snapshot.values:
+                    initial = None
+                elif reusable and (directory / "report.json").exists():
+                    raise ValueError("Restore checkpoints.sqlite together with the existing run directory")
                 print(f"Task ID: {task_id}", flush=True)
+                if args.result_file:
+                    write_json(args.result_file, {"task_id": task_id, "directory": str(directory),
+                               "report": str(directory / "report.json"), "markdown": str(directory / "report.md")})
                 if initial is not None:
                     record_run_inputs(directory, initial["task"], input_log)
                 error = None
@@ -258,7 +287,7 @@ def main(argv=None, *, adapter_factory=PytestAdapter) -> int:
                             artifact = record_resume(directory, state, snapshot.next, checkpoint, repo, str(failure))
                             previous = directory / "report.json"
                             report = read_report(previous) if previous.is_file() else {"schema_version": 2, **state}
-                            write_json(previous, {**report, "status": "interrupted", "reason_code": "resume_check_failed",
+                            write_report(directory, {**report, "status": "interrupted", "reason_code": "resume_check_failed",
                                                   "reason": str(failure), "next": list(snapshot.next),
                                                   "recovery": [*report.get("recovery", []), artifact]})
                             append_workflow_event(directory, task_id, "task_interrupted", recovery=artifact, next=list(snapshot.next))
