@@ -1,0 +1,116 @@
+name: Real bug benchmark
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Experiment
+        type: choice
+        options: [calibrate, tools, rag, feedback, memory, compare]
+        default: calibrate
+      cases:
+        description: Evaluation case ID or all
+        default: case-04
+        required: true
+      repeat:
+        description: Trials per model configuration
+        type: choice
+        options: ['1', '2', '3']
+        default: '1'
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      cases: ${{ steps.select.outputs.cases }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: select
+        env:
+          REQUESTED: ${{ inputs.cases }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          sys.path.insert(0, 'evals')
+          from manifest import load_cases
+          cases = [c.id for c in load_cases() if c.split == 'evaluation'
+                   and os.environ['REQUESTED'] in ('all', c.id)]
+          if not cases:
+              raise SystemExit("Choose an ID from evals/cases/evaluation.jsonl or all")
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              print('cases=' + json.dumps(cases), file=stream)
+          PY
+
+  benchmark:
+    needs: select
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        case: ${{ fromJSON(needs.select.outputs.cases) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e . pytest==9.2.0
+      - run: docker build -t ci-repair-eval - < evals/Dockerfile
+      - name: Run selected case
+        env:
+          BENCH_MODE: ${{ inputs.mode }}
+          CASE_ID: ${{ matrix.case }}
+          REPEATS: ${{ inputs.repeat }}
+          MODEL: ${{ vars.CI_REPAIR_MODEL || 'deepseek:deepseek-flash' }}
+          DEEPSEEK_API_KEY: ${{ inputs.mode != 'calibrate' && secrets.API_KEY || '' }}
+        run: |
+          args=(--case "$CASE_ID" --image ci-repair-eval --output "results/$CASE_ID")
+          if [[ "$BENCH_MODE" != calibrate ]]; then
+            [[ -n "$DEEPSEEK_API_KEY" ]] || { echo "Configure the repository secret API_KEY"; exit 2; }
+            args+=(--model "$MODEL" --repeat "$REPEATS")
+            if [[ "$BENCH_MODE" != compare ]]; then args+=(--modes "$BENCH_MODE"); fi
+          fi
+          python evals/run.py real "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: case-${{ matrix.case }}
+          path: |
+            results/${{ matrix.case }}/results.json
+            results/${{ matrix.case }}/**/calibration.json
+            results/${{ matrix.case }}/**/evidence/*.xml
+            results/${{ matrix.case }}/**/pytest.log
+            results/${{ matrix.case }}/**/runs/**
+          if-no-files-found: error
+
+  summary:
+    if: always() && needs.select.result == 'success'
+    needs: [select, benchmark]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: case-*
+          path: collected
+      - name: Pool per-case counts
+        env:
+          CASES: ${{ needs.select.outputs.cases }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'evals')
+          from summarize import summarize
+          rows = []
+          for case in json.loads(os.environ['CASES']):
+              data = json.loads((Path('collected') / ('case-' + case) / 'results.json').read_text())
+              rows.extend(data['rows'])
+          Path('summary.json').write_text(json.dumps(summarize(rows), indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-summary
+          path: summary.json

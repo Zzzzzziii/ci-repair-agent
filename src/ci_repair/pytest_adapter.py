@@ -93,12 +93,13 @@ class PytestAdapter:
     def __init__(
         self, interpreter: Path, scratch: Path, timeout: float, *, task_directory: Path | None = None,
         source_paths: list[str] | None = None, import_modules: list[str] | None = None,
-        pytest_args: list[str] | None = None, budget=None,
+        pytest_args: list[str] | None = None, budget=None, process_runner=run_process,
     ):
         self.interpreter = interpreter
         self.scratch = scratch
         self.timeout = timeout
         self.budget = budget
+        self.run_process = process_runner
         self.task_directory = task_directory
         self.source_paths = source_paths or []
         self.import_modules = import_modules or []
@@ -136,7 +137,7 @@ class PytestAdapter:
                     self.budget.reserve_call("tests", run_directory.name)
                     timeout = min(timeout, self.budget.check_budget())
                 try:
-                    process = run_process(
+                    process = self.run_process(
                         command, cwd=directory, env=env, stdout_path=stdout, stderr_path=stderr, timeout=timeout,
                     )
                 finally:

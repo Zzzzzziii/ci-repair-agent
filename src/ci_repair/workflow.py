@@ -41,7 +41,8 @@ class RepairState(TypedDict, total=False):
     reason_code: str
 
 
-def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool = False, relocated_repo=None, config_override=None):
+def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool = False, relocated_repo=None,
+                   config_override=None, adapter_factory=PytestAdapter):
     scratch = storage / "scratch"
     scratch.mkdir(exist_ok=True)
     memory = RepairMemory(storage / "repairs.sqlite")
@@ -90,7 +91,7 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
         return run
 
     def adapter(task):
-        return PytestAdapter(
+        return adapter_factory(
             Path(task["python"]),
             scratch,
             task["timeout"],
