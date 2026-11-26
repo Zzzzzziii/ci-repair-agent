@@ -2,6 +2,7 @@
 cwd = "."
 source_paths = ["src"]  # Use [] for a flat layout.
 # import_modules = ["my_package"]  # Project modules that tests should import from the worktree.
+# pytest_args = ["-m", "unit"]  # One option or argument per entry.
 regression = ["tests"]  # Paths and node IDs are relative to cwd.
 timeout = 120
 # python = ".venv/Scripts/python.exe"  # Windows. Use .venv/bin/python on Linux/macOS.

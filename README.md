@@ -47,6 +47,10 @@ uv run ci-repair doctor --repo D:\my-service --import my_package
 
 要验证测试加载的源码，在配置中加 `import_modules = ["my_package"]`，或给 `fix` 传 `--import my_package`。`doctor` 也会检查配置里的模块能解析到哪里。运行 pytest 时，报告的 `imports` 字段记录指定模块实际加载过的路径，`runtime` 字段记录测试进程的 Python 和 pytest 版本。目标测试或回归测试发现模块来自 worktree 外部时，修复任务或候选会被标为 `blocked`。每个指定模块至少要在一次目标测试或回归测试的 pytest 进程中被观察到。配置项应填写本项目的模块，混合命名空间包可填写项目所属的具体子模块。
 
+配置 `pytest_args = ["-m", "unit"]` 可以声明额外 pytest 参数，列表的每项是一个命令行参数。重复传 `--pytest-arg=-m --pytest-arg=unit` 可覆盖配置。基线和候选沿用同一组参数，`doctor` 和 `manifest.json` 会列出它们。
+
+测试结果的 `runtime.environment_fingerprint` 汇总实际解释器、pytest 与安装包版本、pytest 参数、相关环境选项和配置文件内容的摘要。首次基线目标测试的指纹也写入清单。候选与基线的同类测试指纹不同会得到 `environment_changed`，例如暂停后改变了 pytest 插件加载设置。
+
 ### 修复报告
 
 输出中的任务 ID 对应 `~/.ci-repair/runs/<task_id>/report.json`。要换位置，在子命令前传 `--state-dir`。验收保留基线中已通过的用例，并单独记录基线已有的其他失败。首版支持修改已有的 Python 业务源码。补丁应用在临时 Git worktree 中，用户的当前工作目录不受影响。测试以目标解释器在本机执行，请用于自己的仓库。
@@ -68,6 +72,8 @@ Agent 开始执行修复任务前，会在任务目录生成 `manifest.json`，�
 `collected` 列出 pytest 筛选后选中的用例，`session_finished` 表示会话结束的证据已写入。执行只完成了收集时，已选中却没有运行的用例会标为 `not_run`，即使 pytest 返回 0，Agent 也会报告 `incomplete`。验收会比较各候选与基线的收集范围，`missing_tests` 记录消失的用例，`unexecuted_tests` 记录已收集但没运行的用例。测试在收集后超时时，可以从 `pytest.json` 查看已保存的收集清单。
 
 `failure_kind` 区分业务测试失败、缺少依赖、收集错误、fixture 错误、会话中断和超时。遇到 `ModuleNotFoundError` 时，`missing_dependencies` 会记录缺少的导入名及发生阶段。测试执行无法提供可靠结果时，验收报告会标为 `blocked`，并给出 `reason_code`。基线没有复现失败时记录 `failure_not_reproduced`，可以通过 `target_outcomes` 查看用例实际是通过、跳过还是缺失。
+
+`worktrees` 指向本次任务创建的临时工作区记录。每条记录包含用途、路径、检出的提交和清理状态。创建或清理失败、上次运行中断时留下的未确认记录会列在 `worktree_issues`，可和已采集的测试结果一起查看。
 
 ### 暂停和记忆
 

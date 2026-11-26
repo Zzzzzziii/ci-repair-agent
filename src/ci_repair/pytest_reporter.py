@@ -1,8 +1,38 @@
 """Executed by the target project's Python interpreter."""
 
+from hashlib import sha256
+from importlib.metadata import distributions
 import json
+import os
 from pathlib import Path
 import sys
+
+
+def runtime_environment(pytest_version: str, pytest_args: list[str]) -> dict:
+    packages = []
+    for distribution in distributions():
+        metadata = distribution.metadata
+        if name := metadata.get("Name"):
+            packages.append((name.lower(), metadata.get("Version") or ""))
+    runtime = {
+        "python": sys.executable,
+        "python_version": sys.version.split()[0],
+        "platform": sys.platform,
+        "pytest_version": pytest_version,
+        "package_count": len(packages),
+    }
+    material = {
+        **runtime,
+        "packages": sorted(packages),
+        "pytest_args": pytest_args,
+        "pytest_environment": {
+            name: os.environ.get(name)
+            for name in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD")
+        },
+    }
+    runtime["environment_fingerprint"] = sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()
+    return runtime
+
 
 class Reporter:
     def __init__(self, destination: Path, modules: list[str]):
@@ -13,7 +43,15 @@ class Reporter:
         self.collection_errors = []
         self.missing_dependencies = []
         self.session_finished = False
-        self.pytest_version = None
+        self.runtime = {"python": sys.executable, "python_version": sys.version.split()[0], "pytest_version": None}
+
+    def pytest_configure(self, config):
+        config_path = config.inipath
+        if config_path is not None:
+            digest = sha256(config_path.read_bytes()).hexdigest()
+            self.runtime["pytest_config"] = {"path": str(config_path), "sha256": digest}
+            previous = self.runtime["environment_fingerprint"]
+            self.runtime["environment_fingerprint"] = sha256(f"{previous}:{digest}".encode("ascii")).hexdigest()
 
     def pytest_collection_finish(self, session):
         self.collected = [item.nodeid for item in session.items]
@@ -66,11 +104,7 @@ class Reporter:
             "missing_dependencies": self.missing_dependencies,
             "session_finished": self.session_finished,
             "imports": {name: sorted(paths) for name, paths in self.imports.items()},
-            "runtime": {
-                "python": sys.executable,
-                "python_version": sys.version.split()[0],
-                "pytest_version": self.pytest_version,
-            },
+            "runtime": self.runtime,
         }
         temporary = self.destination.with_suffix(".tmp")
         temporary.write_text(json.dumps(evidence), encoding="utf-8")
@@ -79,7 +113,8 @@ class Reporter:
 
 def main():
     destination = Path(sys.argv[1])
-    reporter = Reporter(destination, json.loads(sys.argv[2]))
+    options = json.loads(sys.argv[2])
+    reporter = Reporter(destination, options["imports"])
     try:
         import pytest
     except ModuleNotFoundError as error:
@@ -88,10 +123,11 @@ def main():
         reporter.write_evidence()
         print(str(error), file=sys.stderr)
         return 1
-    reporter.pytest_version = pytest.__version__
+    pytest_args = options["pytest_args"]
+    reporter.runtime = runtime_environment(pytest.__version__, pytest_args)
     sys.path.insert(0, str(Path.cwd()))
     exit_code = pytest.main(
-        ["-q", "-p", "no:cacheprovider", "--tb=short", f"--rootdir={Path.cwd()}", "--", *sys.argv[3:]],
+        ["-q", "-p", "no:cacheprovider", "--tb=short", *pytest_args, f"--rootdir={Path.cwd()}", "--", *sys.argv[3:]],
         plugins=[reporter],
     )
     reporter.write_evidence()

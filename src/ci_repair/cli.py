@@ -24,6 +24,7 @@ def add_project_arguments(command: argparse.ArgumentParser) -> None:
     command.add_argument("--cwd", help="Target project directory relative to the repository")
     command.add_argument("--python", help="Python interpreter with target dependencies")
     command.add_argument("--source-path", action="append", help="Source directory relative to the repository; repeatable")
+    command.add_argument("--pytest-arg", action="append", help="Pytest argument; repeatable, e.g. --pytest-arg=-x")
     command.add_argument("--regression", action="append", help="Regression path or node ID relative to --cwd; repeatable")
     command.add_argument("--timeout", type=float, help="Timeout per pytest invocation in seconds")
 
@@ -103,7 +104,7 @@ def new_state(args, log: str) -> dict:
 def project_profile(args):
     return resolve_project_profile(
         args.repo, args.config, cwd=args.cwd, python=args.python, source_paths=args.source_path,
-        import_modules=args.imports, regression=args.regression, timeout=args.timeout,
+        import_modules=args.imports, pytest_args=args.pytest_arg, regression=args.regression, timeout=args.timeout,
     )
 
 

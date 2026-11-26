@@ -39,6 +39,7 @@ class ProjectProfile(TypedDict):
     python: str
     source_paths: list[str]
     import_modules: list[str]
+    pytest_args: list[str]
     regression: list[str]
     timeout: float
 
@@ -55,11 +56,13 @@ class RunManifest(TypedDict):
     python: str
     source_paths: list[str]
     import_modules: list[str]
+    pytest_args: list[str]
     regression: list[str]
     timeout: float
     targets: list[str]
     model: str | None
     input_log: str | None
+    environment_fingerprint: NotRequired[str]
 
 
 ModelCallPurpose = Literal["initialize", "explore", "propose"]

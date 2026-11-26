@@ -488,14 +488,15 @@ def test_repair_uses_declared_layout(tmp_path, directory, source_directory):
     (fixture / source).write_text("price = 5\n", encoding="utf-8")
     tests = fixture / directory / "tests"
     tests.mkdir(parents=True)
+    (fixture / directory / "pytest.ini").write_text("[pytest]\nmarkers = unit: unit case\n", encoding="utf-8")
     (tests / "test_price.py").write_text(
-        "from sample_price import price\n\n"
-        "def test_price():\n    assert price == 9\n\n"
-        "def test_positive():\n    assert price > 0\n", encoding="utf-8",
+        "import pytest\nfrom sample_price import price\n\n"
+        "@pytest.mark.unit\ndef test_price():\n    assert price == 9\n\n"
+        "def test_excluded():\n    assert False\n", encoding="utf-8",
     )
     (fixture / ".ci-repair.toml").write_text(
         f'cwd = "{directory}"\nsource_paths = ["{source_directory}"]\n'
-        'import_modules = ["sample_price"]\nregression = ["tests"]\n', encoding="utf-8",
+        'import_modules = ["sample_price"]\nregression = ["tests"]\npytest_args = ["-m", "unit"]\n', encoding="utf-8",
     )
     repo = tmp_path / "repo"
     make_repository(repo, fixture)
@@ -510,11 +511,47 @@ def test_repair_uses_declared_layout(tmp_path, directory, source_directory):
     baseline = report["reference"]["target"]
     candidate = report["validations"][0]["regression"]
     assert (baseline["status"], candidate["status"], report["status"]) == ("failed", "passed", "accepted")
+    assert candidate["collected"] == ["tests/test_price.py::test_price"]
+    fingerprint = baseline["runtime"]["environment_fingerprint"]
+    assert fingerprint == candidate["runtime"]["environment_fingerprint"]
+    manifest = json.loads(report_path.with_name("manifest.json").read_text(encoding="utf-8"))
+    assert manifest["pytest_args"] == ["-m", "unit"]
+    assert manifest["environment_fingerprint"] == fingerprint
+    records = [json.loads((report_path.parent / ref).read_text(encoding="utf-8")) for ref in report["worktrees"]]
+    assert {record["purpose"]: record["status"] for record in records} == {"baseline": "removed", "candidate": "removed"}
+    assert all(record["commit"] == report["task"]["commit"] for record in records)
     for run in (baseline, candidate):
         imported = run["imports"]["sample_price"]
         origin, = imported["origins"]
         assert imported["status"] == "in_worktree"
         assert Path(origin).relative_to(run["cwd"]) == source.relative_to(directory)
+
+
+def test_resume_blocks_when_pytest_environment_changes(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    make_repository(repo, PROJECT / "examples/shipping")
+    storage = tmp_path / "state"
+    wrong, right = tmp_path / "wrong.diff", tmp_path / "right.diff"
+    wrong.write_text("invalid patch", encoding="utf-8")
+    original = (repo / "shipping.py").read_text(encoding="utf-8")
+    create_patch(repo, "shipping.py", original.replace("subtotal >", "subtotal >="), right)
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
+    paused = cli(storage, "fix", "--repo", str(repo), "--test",
+                 "test_shipping.py::test_standard_shipping_at_threshold_is_free",
+                 "--patch", str(wrong), "--patch", str(right), "--pause-after-candidate")
+    assert paused.returncode == 0, paused.stdout + paused.stderr
+    report_path, = (storage / "runs").glob("*/report.json")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "paused"
+
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-q")
+    resumed = cli(storage, "resume", report["task"]["id"])
+    assert resumed.returncode == 2, resumed.stdout + resumed.stderr
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "blocked"
+    assert report["reason_code"] == "environment_changed"
+    assert report["validations"][1]["target"]["status"] == "passed"
+    assert not report_path.with_name("fix.diff").exists()
 
 
 def test_repair_reports_unreproduced_skip_and_missing_dependency(tmp_path):
