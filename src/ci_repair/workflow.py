@@ -103,7 +103,7 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
                 record_retry_feedback(task_directory, feedback)
             proposal = propose(
                 task["model"], tree, task, output, history, feedback,
-                task_directory=task_directory,
+                task_directory=task_directory, index_cache=storage / "retrieval",
             )
         return {
             "candidates": [*candidates, *proposal["candidates"]],
