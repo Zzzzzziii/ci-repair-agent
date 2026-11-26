@@ -19,7 +19,7 @@ uv run ci-repair --state-dir .ci-repair fix --repo $target --python $python --lo
 
 ## 从 GitHub Actions 接入
 
-在**可信代码**的测试作业里使用下面的步骤。将 `<agent-commit>` 换成已审阅的 Agent 完整提交 SHA。示例假设前面已 checkout 当前被测版本、setup-python 3.12 并安装业务依赖。PR 测试若检出 GitHub 生成的合并提交，就使用实际 `HEAD` 记录该次测试的 SHA。checkout 设置 `persist-credentials: false`，作业使用 `contents: read`。目标测试和补丁在调用方 runner 执行，只在自己信任的仓库和分支提供模型 Secret。
+在**可信代码**的测试作业里使用下面的步骤。示例固定到已通过远端演示的 Agent 提交。前置步骤需 checkout 当前被测版本、setup-python 3.12 并安装业务依赖。PR 测试若检出 GitHub 生成的合并提交，就使用实际 `HEAD` 记录该次测试的 SHA。checkout 设置 `persist-credentials: false`，作业使用 `contents: read`。目标测试和补丁在调用方 runner 执行，只在自己信任的仓库和分支提供模型 Secret。
 
 ```yaml
 - id: tests
@@ -35,7 +35,7 @@ uv run ci-repair --state-dir .ci-repair fix --repo $target --python $python --lo
     exit "$rc"
 - id: repair
   if: failure() && steps.tests.outputs.rc == '1'
-  uses: Zzzzzziii/ci-repair-agent@<agent-commit>
+  uses: Zzzzzziii/ci-repair-agent@84f1c32dc5881ef4c4b470051b475e26009e4b0d
   env:
     DEEPSEEK_API_KEY: ${{ secrets.API_KEY }}
   with:
