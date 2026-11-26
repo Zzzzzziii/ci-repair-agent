@@ -8,11 +8,11 @@ from uuid import uuid4
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ci_repair.artifacts import record_model_call, record_retrieval, record_tool_event
 from ci_repair.retrieval import build_index, failure_query, retrieve_code
-from ci_repair.schemas import ModelCallPurpose, ModelCallRecord, RepairFeedback, ToolEvent
+from ci_repair.schemas import ModelCallPurpose, ModelCallRecord, ModelDecision, RepairFeedback, ToolEvent
 from ci_repair.tools import repository_tools, verify_references
 
 
@@ -30,10 +30,10 @@ class ModelStepError(RuntimeError):
     pass
 
 
-def run_model_step(request, purpose: ModelCallPurpose, task: dict, task_directory: Path | None):
+def run_model_step(request, purpose: ModelCallPurpose, task: dict, task_directory: Path | None, *, call_id=None):
     record: ModelCallRecord = {
         "schema_version": 1,
-        "call_id": uuid4().hex,
+        "call_id": call_id or uuid4().hex,
         "task_id": task.get("id", ""),
         "purpose": purpose,
         "status": "running",
@@ -87,10 +87,10 @@ def redact_tool_value(value, secrets: tuple[str, ...]):
 
 
 def execute_repository_tool(call, item, *, budget_available: bool, model_call_id: str,
-                            task_id: str, task_directory: Path | None, secrets: tuple[str, ...]):
+                            task_id: str, task_directory: Path | None, secrets: tuple[str, ...], event_id=None):
     event: ToolEvent = {
         "schema_version": 1,
-        "event_id": uuid4().hex,
+        "event_id": event_id or uuid4().hex,
         "task_id": task_id,
         "model_call_id": model_call_id,
         "tool_call_id": redact_tool_value(call["id"], secrets),
@@ -165,6 +165,64 @@ def code_retriever(tree, task, cache, task_directory, secrets):
     return retrieve
 
 
+def configured_secrets():
+    return tuple(sorted({
+        value for key in ("DEEPSEEK_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "API_KEY")
+        if (value := os.environ.get(key))
+    }, key=len, reverse=True))
+
+
+class StopReason(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+def decide(task, directory, messages, tools, budget) -> ModelDecision:
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    bindings = list(tools)
+    for name, schema, description in (
+        ("submit_patch", Candidate, "Submit a complete diff against the original commit with source evidence."),
+        ("stop_repair", StopReason, "Finish the task and explain why further repair is unjustified."),
+    ):
+        binding = convert_to_openai_tool(schema)
+        binding["function"].update(name=name, description=description)
+        bindings.append(binding)
+    options = {"temperature": 0, "max_retries": 0, "timeout": min(60, budget.check_budget())}
+    if task["model"].startswith(("deepseek:", "deepseek-")):
+        options["extra_body"] = {"thinking": {"type": "disabled"}}
+    model, _ = run_model_step(lambda: init_chat_model(task["model"], **options).bind_tools(bindings),
+                              "initialize", task, directory)
+    identifier = budget.reserve_call("model_calls")
+    reply, _ = run_model_step(lambda: model.invoke(messages), "decision", task, directory, call_id=identifier)
+    budget.record_usage(identifier, reply.usage_metadata)
+    result = {"action": "invalid", "name": "", "args": {}, "tool_call_id": "", "model_call_id": identifier}
+    if len(reply.tool_calls) != 1 or reply.invalid_tool_calls:
+        return result
+    call, = reply.tool_calls
+    name = call["name"]
+    args = call["args"]
+    try:
+        if name == "submit_patch":
+            candidate = Candidate.model_validate(args)
+            if not candidate.diff.strip() or not candidate.hypothesis.strip():
+                return result
+            action, args = "propose", candidate.model_dump()
+        elif name == "stop_repair":
+            reason = StopReason.model_validate(args).reason.strip()
+            if not reason:
+                return result
+            action, args = "stop", {"reason": reason}
+        else:
+            item = next((item for item in tools if item.name == name), None)
+            if item is None:
+                return result
+            item.get_input_schema().model_validate(args)
+            action = "tool"
+    except ValidationError:
+        return result
+    return {**result, "action": action, "name": name, "args": args, "tool_call_id": call["id"] or identifier}
+
+
 def propose(model_name: str, tree: Path, task: dict, failure: str, history: list[dict],
             feedback: list[RepairFeedback], *, task_directory: Path | None = None,
             index_cache: Path | None = None) -> dict:
@@ -173,10 +231,7 @@ def propose(model_name: str, tree: Path, task: dict, failure: str, history: list
         # Structured patch output uses forced tool selection, which needs thinking disabled.
         model_options["extra_body"] = {"thinking": {"type": "disabled"}}
     task_id = task.get("id", "")
-    secrets = tuple(sorted({
-        value for name in ("DEEPSEEK_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "API_KEY")
-        if (value := os.environ.get(name))
-    }, key=len, reverse=True))
+    secrets = configured_secrets()
     retrieve = None
     if index_cache is not None:
         retrieve = code_retriever(tree, task, index_cache, task_directory, secrets)

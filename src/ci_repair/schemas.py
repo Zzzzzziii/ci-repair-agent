@@ -49,6 +49,8 @@ class TestFeedback(TypedDict):
 
 
 class RepairFeedback(TypedDict):
+    candidate_id: NotRequired[str]
+    applied_diff_artifact: NotRequired[str]
     candidate: int
     hypothesis: str
     diff: str
@@ -94,7 +96,41 @@ class RunManifest(TypedDict):
     environment_fingerprint: NotRequired[str]
 
 
-ModelCallPurpose = Literal["initialize", "explore", "propose"]
+ModelCallPurpose = Literal["initialize", "explore", "propose", "decision"]
+
+
+class ModelDecision(TypedDict):
+    action: Literal["tool", "propose", "stop", "invalid"]
+    name: str
+    args: dict
+    tool_call_id: str
+    model_call_id: str
+
+
+class CandidateRecord(TypedDict):
+    model_call_id: NotRequired[str]
+    applied_diff_artifact: NotRequired[str]
+    id: str
+    parent_id: str | None
+    commit: str
+    diff_hash: str
+    diff: str
+    hypothesis: str
+    evidence: list[str]
+
+
+class ValidationResult(TypedDict):
+    status: Literal["accepted", "blocked", "rejected"]
+    candidate: int
+    candidate_id: str
+    reason: NotRequired[str]
+    related: NotRequired[dict]
+
+
+class BudgetState(TypedDict):
+    limits: dict[str, int]
+    deadline: float
+    reservations: dict[str, dict[str, dict]]
 
 
 class ModelCallRecord(TypedDict):
@@ -127,6 +163,7 @@ class ToolEvent(TypedDict):
 WorkflowEventType = Literal[
     "task_started", "task_resumed", "task_paused", "task_interrupted", "task_finished",
     "node_started", "node_finished", "node_failed",
+    "decision", "duplicate_candidate",
 ]
 
 

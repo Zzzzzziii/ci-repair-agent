@@ -136,6 +136,12 @@ def publish(directory: Path, state: dict, next_nodes: tuple, *, status: str, err
                 write_json(manifest_path, manifest)
     if (directory / EVENTS_FILENAME).is_file():
         report["events"] = EVENTS_FILENAME
+    if (directory / "budget.json").is_file():
+        report["budget"] = json.loads((directory / "budget.json").read_text(encoding="utf-8"))
+        calls = report["budget"]["reservations"].get("model_calls", {})
+        report["model_usage"] = [reservation["usage"] or {} for reservation in calls.values()]
+        for temporary in ("prompt", "decision", "observations", "applied_diff", "verdict", "related_run", "target_run"):
+            report.pop(temporary, None)
     for key, category in (
         ("model_calls", MODEL_ARTIFACTS), ("tool_events", TOOL_ARTIFACTS),
         ("retry_feedback", FEEDBACK_ARTIFACTS), ("worktrees", WORKTREE_ARTIFACTS),

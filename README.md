@@ -21,7 +21,7 @@ uv run ci-repair fix --repo D:\checkout-service --test 'tests/test_checkout.py::
 - `--log -` 从标准输入读取日志。识别 pytest 的 `FAILED path::test_name` 摘要，也接受 GitHub Actions 单时间戳前缀。日志缺少准确用例时传 `--test`，可重复。
 - `--commit` 指定失败提交。缺省时读取明确的 `GITHUB_SHA=<SHA>` 或 `commit: <SHA>` 日志行，最后回退到本地 `HEAD`。报告记录版本来源。
 - `--cwd` 指定相对仓库的测试根目录。测试选择器也相对于这个目录。默认回归范围是该目录按项目配置发现的测试套件，可用可重复的 `--regression` 缩小范围。
-- `--strategy batch` 一次生成最多两个候选，默认启用。`--strategy sequential` 先验证一个候选，失败后把测试反馈交给模型再试一次。
+- `--strategy batch` 一次生成最多两个候选，默认启用。`--strategy sequential` 逐个验证候选。模型每轮可以调用一个只读工具、提交完整补丁或说明停止原因。
 - `--patch` 可重复传入一或两份现成 diff，走相同验收流程，无需模型密钥。
 - `--seed-patch` 用一份指定的 diff 作为顺序修复的首个候选。首个候选被拒后，模型可依据反馈提出第二份补丁。此模式需要配置模型。
 
@@ -34,6 +34,12 @@ uv run ci-repair --state-dir .ci-repair/feedback-demo fix --repo . --test 'examp
 ```
 
 `report.json` 的 `retry_feedback` 指向实际提交给模型的有界反馈，`validations` 保留每份候选的测试结果。反馈中的测试产物路径可用于查看原始断言和日志。
+
+顺序模式先验证原失败用例，再检查同一测试文件里基线通过的相关用例，最后运行声明的回归范围。每步都从同一提交重建候选工作区，核对实际应用的 diff。第一个补丁引入的偏远地区反例会出现在反馈中，模型可以读源码重新判断、直接提交修订，或选择结束。重复 diff 会收到纠正提示，已验证的重复候选会跳过测试。
+
+默认预算为 12 次模型请求、18 次工具调用、3 个不同候选、16 次 pytest 执行和 900 秒。命令行可分别传 `--max-model-calls`、`--max-tool-calls`、`--max-candidates`、`--max-tests` 和 `--max-seconds`。pytest 次数包括基线，截止时间包括暂停。调用前先持久化预留额度，中断后继续沿用。已返回的模型用量写进报告，未返回的用量记为 null。模型主动结束、格式连续无效和预算用完分别由 `model_stopped`、`invalid_decision`、`budget_exhausted` 标识。
+
+在报告里按候选的 `parent_id`、`model_call_id` 和验收结果的 `candidate_id` 可以追溯修订过程。`events.jsonl` 中的 `decision` 记录模型每次选择，`duplicate_candidate` 记录重复补丁。要用仓库的 DeepSeek 凭据验证此示例，在 GitHub Actions 手动运行 **CI Repair Agent baseline**，勾选 **Run the shipping regression feedback loop**。运行结束后下载 **repair-results-shipping** 查看实际测试和模型记录。
 
 ### 接入自己的项目
 

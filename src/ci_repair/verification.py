@@ -76,80 +76,94 @@ def verify(adapter: PytestAdapter, task: dict, reference: dict, patch: str, scra
     with worktree(Path(task["repository"]), task["commit"], scratch,
                   task_directory=adapter.task_directory, purpose="candidate") as tree:
         directory = within(tree, task["cwd"])
-        test_paths = [
-            (PurePosixPath(task["cwd"]) / node.partition("::")[0]).as_posix()
-            for run in (reference["target"], reference["regression"])
-            for node in run["tests"]
-        ]
+        test_paths = protected_tests(task, reference)
         try:
             actual_diff = apply_patch(tree, patch, test_paths)
         except (ValueError, OSError) as error:
             return {"status": "rejected", "reason": str(error)}
         target = adapter.run(directory, task["targets"], tree=tree)
-        if target["status"] not in VALID_TEST_RUN:
-            return {"status": "blocked", "target": target, **execution_problem(target, "Target execution")}
-        if environment_changed(reference["target"], target):
-            return {
-                "status": "blocked", "target": target, "reason_code": "environment_changed",
-                "reason": "Target test environment changed since the baseline",
-            }
-        if problem := import_problem(target):
-            return {"status": "blocked", "reason": problem, "reason_code": "import_origin", "target": target}
-        target_outcomes = {node: status_of(target, node) for node in task["targets"]}
-        if target["status"] != "passed" or any(outcome != "passed" for outcome in target_outcomes.values()):
-            return {
-                "status": "rejected", "reason": "Target tests did not all pass",
-                "reason_code": "target_not_passed", "target": target, "target_outcomes": target_outcomes,
-            }
-
+        if problem := judge_target(task, reference, target):
+            return problem
         regression = adapter.run(directory, task["regression"], tree=tree)
-        if regression["status"] not in VALID_TEST_RUN:
-            return {
-                "status": "blocked", "target": target, "regression": regression,
-                **execution_problem(regression, "Regression execution"),
-            }
-        if environment_changed(reference["regression"], regression):
-            return {
-                "status": "blocked", "target": target, "regression": regression,
-                "reason_code": "environment_changed", "reason": "Regression test environment changed since the baseline",
-            }
-        if problem := import_problem(target, regression, require_all=True):
-            return {
-                "status": "blocked", "reason": problem, "reason_code": "import_origin",
-                "target": target, "regression": regression,
-            }
-        baseline_collection = collected_tests(reference["regression"])
-        candidate_collection = collected_tests(regression)
-        missing_tests = (
-            sorted(baseline_collection - candidate_collection)
-            if baseline_collection is not None and candidate_collection is not None else []
-        )
-        unexecuted_tests = sorted(node for node, record in regression["tests"].items() if record["status"] == "not_run")
-        regressions = [
-            node for node, record in reference["regression"]["tests"].items()
-            if record["status"] == "passed" and status_of(regression, node) != "passed"
-        ]
-        remaining_failures = [
-            node for node, record in regression["tests"].items() if record["status"] == "failed"
-        ]
-        new_failures = [
-            node for node in remaining_failures if status_of(reference["regression"], node) != "failed"
-        ]
-        result = {
-            "status": "rejected",
-            "target": target,
-            "regression": regression,
-            "regressions": sorted(set(regressions + new_failures + missing_tests + unexecuted_tests)),
-            "remaining_failures": remaining_failures,
-            "missing_tests": missing_tests,
-            "unexecuted_tests": unexecuted_tests,
+        return judge_regression(task, reference, target, regression, actual_diff)
+
+
+def protected_tests(task, reference):
+    return [
+        (PurePosixPath(task["cwd"]) / node.partition("::")[0]).as_posix()
+        for run in (reference["target"], reference["regression"])
+        for node in run["tests"]
+    ]
+
+
+def judge_target(task, reference, target):
+    if target["status"] not in VALID_TEST_RUN:
+        return {"status": "blocked", "target": target, **execution_problem(target, "Target execution")}
+    if environment_changed(reference["target"], target):
+        return {
+            "status": "blocked", "target": target, "reason_code": "environment_changed",
+            "reason": "Target test environment changed since the baseline",
         }
-        if missing_tests:
-            result.update(reason="Previously collected regression tests are missing", reason_code="missing_tests")
-        elif unexecuted_tests:
-            result.update(reason="Collected regression tests did not run", reason_code="unexecuted_tests")
-        elif result["regressions"]:
-            result.update(reason="New regression failures or previously passing tests did not pass", reason_code="regression")
-        else:
-            result.update(status="accepted", diff=actual_diff)
-        return result
+    if problem := import_problem(target):
+        return {"status": "blocked", "reason": problem, "reason_code": "import_origin", "target": target}
+    target_outcomes = {node: status_of(target, node) for node in task["targets"]}
+    if target["status"] != "passed" or any(outcome != "passed" for outcome in target_outcomes.values()):
+        return {
+            "status": "rejected", "reason": "Target tests did not all pass",
+            "reason_code": "target_not_passed", "target": target, "target_outcomes": target_outcomes,
+        }
+
+    return None
+
+
+def judge_regression(task, reference, target, regression, actual_diff, *, require_all_imports=True):
+    if regression["status"] not in VALID_TEST_RUN:
+        return {
+            "status": "blocked", "target": target, "regression": regression,
+            **execution_problem(regression, "Regression execution"),
+        }
+    if environment_changed(reference["regression"], regression):
+        return {
+            "status": "blocked", "target": target, "regression": regression,
+            "reason_code": "environment_changed", "reason": "Regression test environment changed since the baseline",
+        }
+    if problem := import_problem(target, regression, require_all=require_all_imports):
+        return {
+            "status": "blocked", "reason": problem, "reason_code": "import_origin",
+            "target": target, "regression": regression,
+        }
+    baseline_collection = collected_tests(reference["regression"])
+    candidate_collection = collected_tests(regression)
+    missing_tests = (
+        sorted(baseline_collection - candidate_collection)
+        if baseline_collection is not None and candidate_collection is not None else []
+    )
+    unexecuted_tests = sorted(node for node, record in regression["tests"].items() if record["status"] == "not_run")
+    regressions = [
+        node for node, record in reference["regression"]["tests"].items()
+        if record["status"] == "passed" and status_of(regression, node) != "passed"
+    ]
+    remaining_failures = [
+        node for node, record in regression["tests"].items() if record["status"] == "failed"
+    ]
+    new_failures = [
+        node for node in remaining_failures if status_of(reference["regression"], node) != "failed"
+    ]
+    result = {
+        "status": "rejected",
+        "target": target,
+        "regression": regression,
+        "regressions": sorted(set(regressions + new_failures + missing_tests + unexecuted_tests)),
+        "remaining_failures": remaining_failures,
+        "missing_tests": missing_tests,
+        "unexecuted_tests": unexecuted_tests,
+    }
+    if missing_tests:
+        result.update(reason="Previously collected regression tests are missing", reason_code="missing_tests")
+    elif unexecuted_tests:
+        result.update(reason="Collected regression tests did not run", reason_code="unexecuted_tests")
+    elif result["regressions"]:
+        result.update(reason="New regression failures or previously passing tests did not pass", reason_code="regression")
+    else:
+        result.update(status="accepted", diff=actual_diff)
+    return result

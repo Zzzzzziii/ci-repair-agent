@@ -86,6 +86,8 @@ def run_repair(storage, repository, strategy, model, patch, use_memory):
     ]
     if not use_memory:
         command.append("--no-memory")
+    if model and strategy == "sequential":
+        command.extend(["--max-candidates", "2"])
     command.extend(["--model", model] if model else ["--patch", str(patch)])
     start = monotonic()
     process = subprocess.run(command, capture_output=True, encoding="utf-8", errors="replace", timeout=900)

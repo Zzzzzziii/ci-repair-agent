@@ -245,7 +245,8 @@ def test_resume_after_rejecting_regression(tmp_path):
     assert memory.search("another repository", "shipping threshold") == []
 
 
-def test_seeded_regression_drives_model_retry(tmp_path, monkeypatch):
+@pytest.mark.parametrize("decision", ["read_then_fix", "fix", "stop", "duplicate", "invalid", "budget"])
+def test_seeded_regression_drives_model_retry(tmp_path, monkeypatch, decision):
     fixture = tmp_path / "fixture"
     example = Path("examples/shipping")
     shutil.copytree(PROJECT / example, fixture / example, ignore=shutil.ignore_patterns("__pycache__"))
@@ -262,23 +263,10 @@ def test_seeded_regression_drives_model_retry(tmp_path, monkeypatch):
         def bind_tools(self, tools):
             return self
 
-        def with_structured_output(self, schema, *, include_raw):
-            assert schema is model.Proposal and include_raw
-            return self
-
         def invoke(self, messages):
             recorded = json.loads(messages[1].content.partition("Rejected attempts in this task: ")[2])
-            if str(messages[-1].content).startswith("Return up to"):
-                assert any(isinstance(message, ToolMessage) and "if remote_area:" in message.content for message in messages)
-                proposal = model.Proposal(candidates=[model.Candidate(
-                    hypothesis="Keep the remote fee before the free-shipping threshold check",
-                    evidence=[f"{source.as_posix()}:10"], diff=fixed.read_text(encoding="utf-8"),
-                )])
-                return {"parsed": proposal, "raw": AIMessage(content="")}
-            if isinstance(messages[-1], ToolMessage):
-                return AIMessage(content="The remote fee branch needs priority")
-
-            captured_feedback.append(recorded)
+            if not captured_feedback:
+                captured_feedback.append(recorded)
             attempt, = recorded
             failure, = attempt["regression"]["failures"]
             assert attempt["target"]["status"] == "passed"
@@ -287,6 +275,19 @@ def test_seeded_regression_drives_model_retry(tmp_path, monkeypatch):
             assert "test_shipping.py:" in failure["detail"]
             saved, = (storage / "runs").glob("*/artifacts/feedback/after-candidate-1.json")
             assert json.loads(saved.read_text(encoding="utf-8"))["attempts"] == recorded
+            if decision == "invalid":
+                return AIMessage(content="Unstructured reply")
+            if decision in ("stop", "duplicate") and (decision == "stop" or "already failed" in messages[-1].content):
+                return AIMessage(content="", tool_calls=[{"id": "stop", "name": "stop_repair",
+                                 "args": {"reason": "Insufficient evidence for a distinct fix"}}])
+            if decision in ("fix", "duplicate") or isinstance(messages[-1], ToolMessage):
+                if decision == "read_then_fix":
+                    assert "if remote_area:" in messages[-1].content
+                return AIMessage(content="", tool_calls=[{"id": "patch", "name": "submit_patch", "args": {
+                    "hypothesis": "Keep the remote fee of 25 before the free-shipping threshold check",
+                    "evidence": [f"{source.as_posix()}:10"],
+                    "diff": (seed if decision == "duplicate" else fixed).read_text(encoding="utf-8"),
+                }}])
             return AIMessage(content="", tool_calls=[{
                 "id": "read-shipping", "name": "read_file", "args": {"path": source.as_posix(), "end_line": 14},
             }])
@@ -298,17 +299,29 @@ def test_seeded_regression_drives_model_retry(tmp_path, monkeypatch):
         "--test", f"{example.as_posix()}/test_shipping.py::test_standard_shipping_at_threshold_is_free",
         "--regression", example.as_posix(), "--model", "deepseek:deepseek-flash", "--seed-patch", str(seed),
         "--pause-after-candidate",
+        *(["--max-tool-calls", "0"] if decision == "budget" else []),
     ]) == 0
 
     report_path, = (storage / "runs").glob("*/report.json")
     paused = json.loads(report_path.read_text(encoding="utf-8"))
     assert paused["status"] == "paused"
-    assert paused["next"] == ["generate"]
+    assert paused["next"] == ["retrieve"]
     assert paused["validations"][0]["status"] == "rejected"
     assert not captured_feedback
 
-    assert main(["--state-dir", str(storage), "resume", paused["task"]["id"]]) == 0
+    successful = decision in ("read_then_fix", "fix")
+    assert main(["--state-dir", str(storage), "resume", paused["task"]["id"]]) == (0 if successful else 1)
     report = json.loads(report_path.read_text(encoding="utf-8"))
+    if not successful:
+        assert report["status"] == "rejected"
+        assert report["reason_code"] == {"stop": "model_stopped", "duplicate": "model_stopped",
+                                        "invalid": "invalid_decision", "budget": "budget_exhausted"}[decision]
+        assert len(report["validations"]) == len(report["candidates"]) == 1
+        if decision == "duplicate":
+            assert any(event["event"] == "duplicate_candidate" for event in read_timeline(report_path.parent / "events.jsonl"))
+        if decision == "invalid":
+            assert len(report["budget"]["reservations"]["model_calls"]) == 2
+        return
     assert report["status"] == "accepted"
     assert report["task"]["strategy"] == "sequential"
     assert [validation["status"] for validation in report["validations"]] == ["rejected", "accepted"]
@@ -317,7 +330,9 @@ def test_seeded_regression_drives_model_retry(tmp_path, monkeypatch):
     assert captured_feedback == [payload["attempts"]]
     pytest_path = payload["attempts"][0]["regression"]["artifacts"]["pytest_report"]
     assert (report_path.parent / pytest_path).is_file()
-    assert report["tool_trace"][0]["tool"] == "read_file"
+    assert report["candidates"][1]["parent_id"] == report["validations"][0]["candidate_id"]
+    if decision == "read_then_fix":
+        assert report["tool_trace"][0]["tool"] == "read_file"
     assert "subtotal >=" in report_path.with_name("fix.diff").read_text(encoding="utf-8")
 
 
