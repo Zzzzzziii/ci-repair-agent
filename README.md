@@ -92,6 +92,26 @@ uv run ci-repair resume <task_id>
 
 LangGraph 把任务状态存进 SQLite。完成验证的候选会被记住，恢复后从待执行的节点继续。验收通过的修复经验可以在新任务中按同一仓库、用例名和失败特征检索，帮助模型定位。使用 `--no-memory` 可关闭本次任务的历史检索和写入。
 
+**恢复同一个任务。** 在原来的 `--state-dir` 下运行 `status` 能看到任务状态、提交、检查点、已验收候选数和下一个节点。进程中断后，`resume` 核对仓库身份、提交、候选 diff 和已保存的测试证据，并用目标解释器核对环境指纹。校验通过后，已提交到检查点的步骤直接复用，执行中的步骤在新的工作区重跑。外部模型请求结果未知时，已预留的额度继续计入预算。每次恢复尝试的结果可从报告的 `recovery` 打开。
+
+```powershell
+uv run ci-repair --state-dir .ci-repair status TASK_ID
+uv run ci-repair --state-dir .ci-repair resume TASK_ID --repo D:\moved-service
+```
+
+目录搬迁后需要保留原状态目录、失败提交以及可复现的 Python 环境。仓库可以在项目 TOML 中设置稳定的 `repo_id = "my-team/service"`。默认使用去除身份凭据后规范化的远端地址生成标识。纯本地仓库把随机标识持久化在 Git 公共目录的 `ci-repair-id.sqlite`。需要指定移动后的外部配置时，可给 `resume` 传 `--config`。检查点早于仓库身份功能的任务沿用原位置恢复。
+
+**在新任务中使用历史经验。** 每条经验记录来源任务、候选号、提交、假设和实际验收结果。被回归测试拒绝的候选也会保存，供模型参考已经观察到的失败。检索只返回当前仓库中启用、来源报告和验收产物可核查的记录。旧经验库首次访问时迁移。可以查看经验，按 ID 禁用或删除。
+
+```powershell
+uv run ci-repair --state-dir .ci-repair memory list --repo .
+uv run ci-repair --state-dir .ci-repair memory show EXPERIENCE_ID --repo .
+uv run ci-repair --state-dir .ci-repair memory disable EXPERIENCE_ID --repo .
+uv run ci-repair --state-dir .ci-repair memory delete EXPERIENCE_ID --repo .
+```
+
+运行 `uv run python evals/memory.py --output .ci-repair/memory-comparison` 可复现三组离线对照，输出目录需为新目录。关闭记忆时使用已知正确的参考补丁，另外两组直接重放检索到的历史补丁。三组的当前失败断言相同，旧规则“所有订单免运费”能通过当前的目标用例，但会破坏低于门槛仍需收费的回归用例。各组测试结果和来源任务保存在 `results.json`。
+
 ### 从失败用例检索源码
 
 模型修复默认启用 `--retrieval bm25`。Agent 从复现时的断言和测试节点提取查询，使用 AST 把失败提交中跟踪的 Python 文件切成函数、方法、类和模块代码块。SQLite FTS5 负责 BM25 排序，Agent 同时匹配完整符号名，并沿可解析的静态导入最多追两跳。相同的 Git blob 可以跨提交复用解析结果。再次修复同一个提交时，Agent 可以直接重用索引。

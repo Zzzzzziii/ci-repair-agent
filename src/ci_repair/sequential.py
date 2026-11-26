@@ -48,7 +48,7 @@ def register_sequential(graph, record_node, storage, memory, adapter):
             raise BudgetExhausted("candidates")
         output = state["reference"]["target"]["output"]
         query = failure_query(task["targets"], output)
-        history = memory.search(task["repository_key"], query) if task["use_memory"] else []
+        history = memory.search(task["repository_key"], query, exclude_task=task["id"]) if task["use_memory"] else []
         search = model.code_retriever(Path(task["repository"]), task, storage / "retrieval",
                                       directory(task), model.configured_secrets())
         context = search(query, 6, purpose="initial")["context"]
@@ -56,7 +56,7 @@ def register_sequential(graph, record_node, storage, memory, adapter):
                     for candidate, validation in zip(state.get("candidates", []), state.get("validations", []))
                     if validation["status"] == "rejected"]
         prompt = (f"Failed commit: {task['commit']}\nTargets: {task['targets']}\n{output[-12000:]}\n"
-                  f"Verified historical repairs: {history}\nRetrieved code: {json.dumps(context, ensure_ascii=False)}\n"
+                  f"Historical attempts and their observed outcomes (recheck applicability): {history}\nRetrieved code: {json.dumps(context, ensure_ascii=False)}\n"
                   f"Rejected attempts in this task: {json.dumps(feedback, ensure_ascii=False)}")
         return {"prompt": prompt, "history": history, "observations": [], "corrections": 0}
 

@@ -11,6 +11,7 @@ from ci_repair.budget import Budget, BudgetExhausted
 from ci_repair.sequential import register_sequential
 from ci_repair.feedback import build_feedback
 from ci_repair.memory import RepairMemory
+from ci_repair.recovery import checkpoint_evidence, resume_config
 from ci_repair.model import propose
 from ci_repair.pytest_adapter import PytestAdapter
 from ci_repair.verification import baseline, verify
@@ -18,6 +19,7 @@ from ci_repair.workspace import worktree
 
 
 class RepairState(TypedDict, total=False):
+    evidence_hashes: dict[str, str]
     prompt: str
     observations: list[dict]
     corrections: int
@@ -39,13 +41,17 @@ class RepairState(TypedDict, total=False):
     reason_code: str
 
 
-def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool = False):
+def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool = False, relocated_repo=None, config_override=None):
     scratch = storage / "scratch"
     scratch.mkdir(exist_ok=True)
     memory = RepairMemory(storage / "repairs.sqlite")
 
     def record_node(name, action):
         def run(state: RepairState):
+            if relocated_repo is not None or config_override is not None:
+                repo = relocated_repo or Path(state["task"]["repository"])
+                cfg = resume_config(state["task"], repo, config_override)
+                state = {**state, "task": {**state["task"], "repository": str(repo), "project_config": str(cfg) if cfg else None}}
             task_id = state["task"]["id"]
             directory = storage / "runs" / task_id
             details = {"node": name, "step_id": uuid4().hex}
@@ -58,6 +64,10 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
                 if budget:
                     budget.check_budget()
                 updates = action(state)
+                if relocated_repo is not None or config_override is not None:
+                    updates["task"] = state["task"]
+                if state["task"].get("data_version") == 2:
+                    updates["evidence_hashes"] = checkpoint_evidence(directory, updates, state.get("evidence_hashes", {}))
                 if budget:
                     budget.check_budget()
             except BudgetExhausted as error:
@@ -108,7 +118,7 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
         task = state["task"]
         output = state["reference"]["target"]["output"]
         query = " ".join(task["targets"]) + " " + output[-4000:]
-        history = memory.search(task["repository_key"], query) if task["use_memory"] else []
+        history = memory.search(task["repository_key"], query, exclude_task=task["id"]) if task["use_memory"] else []
         candidates = state.get("candidates", [])
         feedback = [
             build_feedback(candidate, result, task["targets"])
@@ -142,6 +152,12 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
         return {"validations": [*previous, {"candidate": len(previous) + 1, **result}]}
 
     def finish(state: RepairState):
+        task = state["task"]
+        if task["use_memory"]:
+            for verdict in state.get("validations", []):
+                if verdict["status"] in ("accepted", "rejected"):
+                    memory.save_experience(task, state["candidates"][verdict["candidate"] - 1], verdict,
+                                           state["reference"]["target"]["output"])
         if state["status"] in ("blocked", "rejected"):
             return {}
         results = state.get("validations", [])
@@ -154,19 +170,6 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
                     "reason_code": blocked.get("reason_code", "execution_error"),
                 }
             return {"status": "rejected", "reason": "No candidate passed verification"}
-        task = state["task"]
-        if task["use_memory"]:
-            candidate = state["candidates"][accepted["candidate"] - 1]
-            memory.save(task["id"], task["repository_key"], {
-                "commit": task["commit"],
-                "targets": task["targets"],
-                "signature": state["reference"]["target"]["output"][-1000:],
-                "hypothesis": candidate["hypothesis"],
-                "evidence": candidate["evidence"],
-                "verified_tests": sum(
-                    item["status"] == "passed" for item in accepted["regression"]["tests"].values()
-                ),
-            })
         return {"status": "accepted"}
 
     def after_baseline(state):

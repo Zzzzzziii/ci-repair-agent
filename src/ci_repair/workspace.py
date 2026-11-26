@@ -113,5 +113,6 @@ def apply_patch(tree: Path, patch: str, protected_selectors: list[str]) -> str:
 
 
 def repository_key(repository: Path) -> str:
-    common = git(repository, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
-    return os.path.normcase(str(Path(common).resolve()))
+    from ci_repair.project import repository_id
+
+    return repository_id(repository)

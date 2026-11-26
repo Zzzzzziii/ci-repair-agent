@@ -1,6 +1,23 @@
 from typing import Literal, NotRequired, TypedDict
 
 
+class RepairExperience(TypedDict):
+    schema_version: int
+    source_task: str
+    source_report: str
+    candidate: int | None
+    commit: str
+    targets: list[str]
+    signature: str
+    hypothesis: str
+    evidence: list[str]
+    outcome: str
+    failure_category: str
+    verified_tests: int
+    regression: list[str]
+    reason: str | None
+
+
 class CodeChunk(TypedDict):
     start_line: int
     end_line: int
@@ -62,6 +79,7 @@ class RepairFeedback(TypedDict):
 
 class ProjectProfile(TypedDict):
     repository: str
+    explicit_repo_id: str | None
     project_config: str | None
     cwd: str
     python: str
@@ -93,6 +111,7 @@ class RunManifest(TypedDict):
     retrieval_mode: NotRequired[str | None]
     embedding_model: NotRequired[str | None]
     input_log: str | None
+    input_sha256: NotRequired[str | None]
     environment_fingerprint: NotRequired[str]
 
 
