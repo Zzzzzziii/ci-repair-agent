@@ -37,7 +37,7 @@ def within(directory: Path, relative_path: str) -> Path:
 
 @contextmanager
 def worktree(repository: Path, commit: str, scratch: Path, *, task_directory: Path | None = None,
-             purpose: str = "verification"):
+             purpose: str = "verification", candidate_id: str | None = None):
     parent = scratch.resolve()
     identifier = uuid4().hex
     tree = parent / f"worktree-{identifier}"
@@ -52,7 +52,7 @@ def worktree(repository: Path, commit: str, scratch: Path, *, task_directory: Pa
     def update(status: str, error: str | None = None):
         if task_directory is not None:
             record_worktree(task_directory, {
-                **record, "status": status, "error": error,
+                **record, "status": status, "error": error, "candidate_id": candidate_id,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
 

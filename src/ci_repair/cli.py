@@ -13,6 +13,8 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from ci_repair.artifacts import append_workflow_event, publish, record_run_inputs
 from ci_repair.project import check_project, resolve_project_profile, validate_selector
+from ci_repair.budget import Budget, DEFAULTS
+from ci_repair.sequential import identify
 from ci_repair.pytest_adapter import failing_nodes, normalized_node
 from ci_repair.workflow import build_workflow
 from ci_repair.workspace import commit_id, repository_key
@@ -46,6 +48,9 @@ def parser() -> argparse.ArgumentParser:
                      help="LangChain provider:model identifier for explicit hybrid retrieval")
     fix.add_argument("--strategy", choices=["batch", "sequential"], help="Defaults to batch, or sequential for --seed-patch")
     fix.add_argument("--no-memory", action="store_true")
+    for kind in DEFAULTS:
+        fix.add_argument("--max-" + kind.replace("_", "-"), dest="max_" + kind, type=int,
+                         help=f"Sequential repair budget for {kind} (default {DEFAULTS[kind]})")
     patches = fix.add_mutually_exclusive_group()
     patches.add_argument("--patch", type=Path, action="append", default=[], help="Verify a supplied diff without a model")
     patches.add_argument("--seed-patch", type=Path, help="Verify this first diff before a sequential model retry")
@@ -87,25 +92,36 @@ def new_state(args, log: str) -> dict:
     if args.seed_patch and strategy != "sequential":
         raise ValueError("--seed-patch requires sequential repair")
     initial_patches = [args.seed_patch] if args.seed_patch else args.patch
+    limits = {kind: getattr(args, "max_" + kind) for kind in DEFAULTS}
+    if any(value is not None for value in limits.values()) and (strategy != "sequential" or args.patch):
+        raise ValueError("Repair budgets require model-driven sequential repair")
+    if any(value is not None and value < 0 for value in limits.values()):
+        raise ValueError("Repair budgets must be nonnegative")
+    commit = commit_id(repository, ref)
+    candidates = [
+        {"hypothesis": f"Supplied patch {patch.name}", "evidence": [],
+         "diff": patch.read_text(encoding="utf-8-sig")}
+        for patch in initial_patches
+    ]
+    if args.seed_patch:
+        candidates = [identify(candidates[0], commit, None)]
     return {
         "task": {
             **profile,
             "id": str(uuid4()),
             "repository_key": repository_key(repository),
-            "commit": commit_id(repository, ref),
+            "commit": commit,
             "commit_source": "argument" if args.commit else "CI log" if log_commit else "local HEAD",
             "targets": targets,
             "model": args.model if not args.patch else None,
             "retrieval_mode": args.retrieval if not args.patch else None,
             "embedding_model": embedding_model if not args.patch and args.retrieval == "hybrid" else None,
             "strategy": strategy,
+            "limits": {**DEFAULTS, **{k: v for k, v in limits.items() if v is not None}}
+                      if strategy == "sequential" and not args.patch else None,
             "use_memory": not args.no_memory,
         },
-        "candidates": [
-            {"hypothesis": f"Supplied patch {patch.name}", "evidence": [],
-             "diff": patch.read_text(encoding="utf-8-sig")}
-            for patch in initial_patches
-        ],
+        "candidates": candidates,
         "status": "running",
     }
 
@@ -137,7 +153,7 @@ def main(argv=None) -> int:
         if initial is None and not database.is_file():
             raise ValueError(f"Unknown task: {task_id}")
         storage.mkdir(parents=True, exist_ok=True)
-        config = {"configurable": {"thread_id": task_id}}
+        config = {"configurable": {"thread_id": task_id}, "recursion_limit": 100000}
         with SqliteSaver.from_conn_string(str(database)) as saver:
             graph = build_workflow(saver, storage, pause_after_candidate=getattr(args, "pause_after_candidate", False))
             snapshot = graph.get_state(config)
@@ -184,6 +200,8 @@ def main(argv=None) -> int:
                     status, ending = state["status"], "task_finished"
                 if should_run:
                     append_workflow_event(directory, task_id, ending, status=status, next=list(snapshot.next))
+                if state["task"].get("limits"):
+                    Budget(directory, state["task"]["limits"])
                 publish(directory, state, snapshot.next, status=status, error=error)
             return {"accepted": 0, "paused": 0, "rejected": 1}.get(status, 2)
     except (ValueError, OSError, sqlite3.Error, subprocess.TimeoutExpired) as error:

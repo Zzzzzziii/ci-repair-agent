@@ -93,11 +93,12 @@ class PytestAdapter:
     def __init__(
         self, interpreter: Path, scratch: Path, timeout: float, *, task_directory: Path | None = None,
         source_paths: list[str] | None = None, import_modules: list[str] | None = None,
-        pytest_args: list[str] | None = None,
+        pytest_args: list[str] | None = None, budget=None,
     ):
         self.interpreter = interpreter
         self.scratch = scratch
         self.timeout = timeout
+        self.budget = budget
         self.task_directory = task_directory
         self.source_paths = source_paths or []
         self.import_modules = import_modules or []
@@ -130,9 +131,13 @@ class PytestAdapter:
                     json.dumps({"imports": self.import_modules, "pytest_args": self.pytest_args}), *selectors,
                 ]
                 result["command"] = command
+                timeout = self.timeout
+                if self.budget:
+                    self.budget.reserve_call("tests", run_directory.name)
+                    timeout = min(timeout, self.budget.check_budget())
                 try:
                     process = run_process(
-                        command, cwd=directory, env=env, stdout_path=stdout, stderr_path=stderr, timeout=self.timeout,
+                        command, cwd=directory, env=env, stdout_path=stdout, stderr_path=stderr, timeout=timeout,
                     )
                 finally:
                     if self.task_directory is not None:
@@ -145,7 +150,7 @@ class PytestAdapter:
                 result["output"] = process["output"]
                 if process["timed_out"]:
                     result.update(status="timeout", failure_kind="timeout")
-                    notice = f"pytest exceeded {self.timeout:g}s\n"
+                    notice = f"pytest exceeded {timeout:g}s\n"
                     result["output"] = (notice + process["output"][-(OUTPUT_LIMIT - len(notice)):]).rstrip()
                     if process["cleanup_error"]:
                         result["cleanup_error"] = process["cleanup_error"]

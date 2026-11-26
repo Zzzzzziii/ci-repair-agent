@@ -7,6 +7,8 @@ from uuid import uuid4
 from langgraph.graph import END, START, StateGraph
 
 from ci_repair.artifacts import append_workflow_event, record_retry_feedback
+from ci_repair.budget import Budget, BudgetExhausted
+from ci_repair.sequential import register_sequential
 from ci_repair.feedback import build_feedback
 from ci_repair.memory import RepairMemory
 from ci_repair.model import propose
@@ -16,6 +18,15 @@ from ci_repair.workspace import worktree
 
 
 class RepairState(TypedDict, total=False):
+    prompt: str
+    observations: list[dict]
+    corrections: int
+    decision: dict
+    applied_diff: str
+    target_run: dict
+    related_run: dict
+    related_nodes: list[str]
+    verdict: dict
     task: dict
     reference: dict
     candidates: list[dict]
@@ -43,7 +54,14 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
             append_workflow_event(directory, task_id, "node_started", **details)
             started = monotonic()
             try:
+                budget = Budget(directory, state["task"]["limits"]) if state["task"].get("limits") and name != "finish" else None
+                if budget:
+                    budget.check_budget()
                 updates = action(state)
+                if budget:
+                    budget.check_budget()
+            except BudgetExhausted as error:
+                updates = {"status": "rejected", "reason_code": "budget_exhausted", "reason": f"Budget exhausted: {error}"}
             except Exception as error:
                 append_workflow_event(
                     directory, task_id, "node_failed", **details,
@@ -70,6 +88,7 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
             source_paths=task.get("source_paths"),
             import_modules=task.get("import_modules"),
             pytest_args=task.get("pytest_args"),
+            budget=Budget(storage / "runs" / task["id"], task["limits"]) if task.get("limits") else None,
         )
 
     def reproduce(state: RepairState):
@@ -123,7 +142,7 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
         return {"validations": [*previous, {"candidate": len(previous) + 1, **result}]}
 
     def finish(state: RepairState):
-        if state["status"] == "blocked":
+        if state["status"] in ("blocked", "rejected"):
             return {}
         results = state.get("validations", [])
         accepted = next((result for result in results if result["status"] == "accepted"), None)
@@ -151,8 +170,10 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
         return {"status": "accepted"}
 
     def after_baseline(state):
-        if state["status"] == "blocked":
+        if state["status"] != "running":
             return "finish"
+        if state["task"].get("limits"):
+            return "apply" if state.get("candidates") else "retrieve"
         return "validate" if state.get("candidates") else "generate"
 
     def after_candidate(state):
@@ -166,16 +187,17 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
         return "finish"
 
     graph = StateGraph(RepairState)
+    register_sequential(graph, record_node, storage, memory, adapter)
     graph.add_node("reproduce", record_node("reproduce", reproduce))
     graph.add_node("generate", record_node("generate", generate))
     graph.add_node("validate", record_node("validate", validate))
     graph.add_node("finish", record_node("finish", finish))
     graph.add_edge(START, "reproduce")
-    graph.add_conditional_edges("reproduce", after_baseline, ["finish", "validate", "generate"])
+    graph.add_conditional_edges("reproduce", after_baseline, ["finish", "validate", "generate", "retrieve", "apply"])
     graph.add_edge("generate", "validate")
     graph.add_conditional_edges("validate", after_candidate, ["validate", "generate", "finish"])
     graph.add_edge("finish", END)
     return graph.compile(
         checkpointer=checkpointer,
-        interrupt_after=["validate"] if pause_after_candidate else None,
+        interrupt_after=["validate", "judge"] if pause_after_candidate else None,
     )

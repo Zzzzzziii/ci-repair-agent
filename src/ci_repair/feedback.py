@@ -46,6 +46,10 @@ def build_feedback(candidate: dict, validation: dict, targets: list[str]) -> Rep
         "status": validation["status"],
         "reason": excerpt(validation["reason"], 1200) if validation.get("reason") else None,
     }
+    if candidate.get("id"):
+        feedback["candidate_id"] = candidate["id"]
+    if candidate.get("applied_diff_artifact"):
+        feedback["applied_diff_artifact"] = candidate["applied_diff_artifact"]
     if target := validation.get("target"):
         failed_targets = [node for node in targets if target["tests"].get(node, {}).get("status") != "passed"]
         feedback["target"] = summarize_test_run(target, failed_targets)
