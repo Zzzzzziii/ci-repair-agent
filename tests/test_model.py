@@ -89,7 +89,9 @@ def test_model_uses_real_repository_tool_before_proposal(tmp_path, monkeypatch, 
 
 def test_repository_tool_records_invalid_and_skipped_calls(tmp_path):
     git(tmp_path, "init", "--quiet")
-    read_file = model.repository_tools(tmp_path, "unused")[0]
+    git(tmp_path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "commit", "--allow-empty", "--quiet", "-m", "Baseline")
+    read_file = model.repository_tools(tmp_path, commit_id(tmp_path, "HEAD"))[0]
     model_key = "fixture-key-in-tool-args"
     call = {"type": "tool_call", "id": "read-1", "name": "read_file", "args": {"path": model_key}}
     task_directory = tmp_path / "task"

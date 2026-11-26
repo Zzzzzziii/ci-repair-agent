@@ -11,7 +11,7 @@ from ci_repair.workspace import repository_path, within
 
 
 DEFAULT_CONFIG = ".ci-repair.toml"
-CONFIG_KEYS = {"cwd", "python", "source_paths", "import_modules", "pytest_args", "regression", "timeout"}
+CONFIG_KEYS = {"cwd", "python", "source_paths", "import_modules", "pytest_args", "regression", "timeout", "embedding_model"}
 PROJECT_PROBE = """
 import sys
 if sys.path and sys.path[0] == "":
@@ -49,7 +49,7 @@ def load_project_config(repository: Path, config: Path | None) -> tuple[Path | N
 
     if unknown := sorted(settings.keys() - CONFIG_KEYS):
         raise ValueError(f"Unknown project settings in {path}: {', '.join(unknown)}")
-    for key in ("cwd", "python"):
+    for key in ("cwd", "python", "embedding_model"):
         if key in settings and (not isinstance(settings[key], str) or not settings[key].strip()):
             raise ValueError(f"{key} in {path} must be a nonempty string")
     for key in ("source_paths", "import_modules", "pytest_args", "regression"):
@@ -119,6 +119,7 @@ def resolve_project_profile(
         "pytest_args": options,
         "regression": selectors,
         "timeout": seconds,
+        "embedding_model": settings.get("embedding_model"),
     }
 
 

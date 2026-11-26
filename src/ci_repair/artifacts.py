@@ -15,6 +15,7 @@ MODEL_ARTIFACTS = Path("artifacts") / "model"
 TOOL_ARTIFACTS = Path("artifacts") / "tools"
 FEEDBACK_ARTIFACTS = Path("artifacts") / "feedback"
 WORKTREE_ARTIFACTS = Path("artifacts") / "worktrees"
+RETRIEVAL_ARTIFACTS = Path("artifacts") / "retrieval"
 
 
 def atomic_write(path: Path, content: bytes) -> None:
@@ -55,6 +56,8 @@ def record_run_inputs(directory: Path, task: dict, log: bytes | None) -> None:
         "timeout": task["timeout"],
         "targets": task["targets"],
         "model": task["model"],
+        "retrieval_mode": task.get("retrieval_mode"),
+        "embedding_model": task.get("embedding_model"),
         "input_log": input_log,
     }
     write_json(directory / MANIFEST_FILENAME, manifest)
@@ -80,6 +83,12 @@ def record_retry_feedback(directory: Path, feedback: list[RepairFeedback]) -> No
 
 def record_worktree(directory: Path, record: dict) -> None:
     destination = directory / WORKTREE_ARTIFACTS / f"{record['id']}.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    write_json(destination, record)
+
+
+def record_retrieval(directory: Path, record: dict) -> None:
+    destination = directory / RETRIEVAL_ARTIFACTS / f"{uuid4().hex}.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     write_json(destination, record)
 
@@ -130,6 +139,7 @@ def publish(directory: Path, state: dict, next_nodes: tuple, *, status: str, err
     for key, category in (
         ("model_calls", MODEL_ARTIFACTS), ("tool_events", TOOL_ARTIFACTS),
         ("retry_feedback", FEEDBACK_ARTIFACTS), ("worktrees", WORKTREE_ARTIFACTS),
+        ("retrieval", RETRIEVAL_ARTIFACTS),
     ):
         paths = sorted(
             path.relative_to(directory).as_posix()

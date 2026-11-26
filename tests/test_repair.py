@@ -342,6 +342,65 @@ def test_rejects_test_edit_and_accepts_cross_file_fix(tmp_path):
     assert report["validations"][1]["status"] == "accepted"
 
 
+def test_model_localizes_checkout_with_commit_scoped_retrieval(tmp_path, monkeypatch):
+    repo = tmp_path / "checkout"
+    make_repository(repo, PROJECT / "examples/checkout")
+    patch = tmp_path / "fix.diff"
+    checkout = (repo / "checkout.py").read_text(encoding="utf-8")
+    create_patch(repo, "checkout.py", checkout.replace("shipping_fee(discounted,", "shipping_fee(subtotal,"), patch)
+    storage = tmp_path / "state"
+    initial_contexts = []
+
+    class ScriptedModel:
+        def bind_tools(self, tools):
+            assert {item.name for item in tools} == {
+                "read_file", "search_code", "git_diff", "list_files", "search_symbols", "retrieve_code",
+            }
+            return self
+
+        def with_structured_output(self, schema, *, include_raw):
+            assert schema is model.Proposal and include_raw
+            return self
+
+        def invoke(self, messages):
+            if str(messages[-1].content).startswith("Return up to"):
+                results = {message.tool_call_id: message.content for message in messages if isinstance(message, ToolMessage)}
+                assert "return 0 if subtotal >= 200" in results["read-delivery"]
+                assert json.loads(results["search-delivery"])["context"][0]["symbol"] == "shipping_fee"
+                proposal = model.Proposal(candidates=[model.Candidate(
+                    hypothesis="The caller uses the discounted amount for shipping eligibility",
+                    evidence=["checkout.py:7", "delivery.py:4", "delivery.py:50"],
+                    diff=patch.read_text(encoding="utf-8"),
+                )])
+                return {"parsed": proposal, "raw": AIMessage(content="")}
+            if isinstance(messages[-1], ToolMessage):
+                return AIMessage(content="Verified threshold in delivery.py")
+            context = json.loads(messages[-1].content.partition("\n")[2])
+            initial_contexts.append(context)
+            assert {hit["path"] for hit in context} >= {"checkout.py", "delivery.py", "test_checkout.py"}
+            assert any(hit["symbol"] == "shipping_fee" and "import" in hit["sources"] for hit in context)
+            return AIMessage(content="", tool_calls=[
+                {"id": "read-delivery", "name": "read_file", "args": {"path": "delivery.py", "end_line": 4}},
+                {"id": "search-delivery", "name": "retrieve_code", "args": {"query": "shipping_fee"}},
+            ])
+
+    monkeypatch.setattr(model, "init_chat_model", lambda *args, **kwargs: ScriptedModel())
+    assert main(["--state-dir", str(storage), "fix", "--repo", str(repo), "--model", "deepseek:deepseek-flash",
+                 "--test", "test_checkout.py::test_discount_keeps_free_shipping", "--no-memory"]) == 0
+    report_path, = (storage / "runs").glob("*/report.json")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "accepted"
+    candidate, = report["candidates"]
+    assert candidate["evidence"] == ["checkout.py:7", "delivery.py:4"]
+    assert candidate["unverified_evidence"] == ["delivery.py:50"]
+    traces = [json.loads((report_path.parent / path).read_text(encoding="utf-8")) for path in report["retrieval"]]
+    assert {trace["purpose"] for trace in traces} == {"initial", "tool"}
+    assert all(trace["commit"] == report["task"]["commit"] for trace in traces)
+    initial = next(trace for trace in traces if trace["purpose"] == "initial")
+    assert initial["context"] == initial_contexts[0]
+    assert report_path.with_name("fix.diff").is_file()
+
+
 def test_saves_rejected_model_candidate(tmp_path, monkeypatch):
     repo = tmp_path / "shipping"
     make_repository(repo, PROJECT / "examples/shipping")

@@ -1,6 +1,32 @@
 from typing import Literal, NotRequired, TypedDict
 
 
+class CodeChunk(TypedDict):
+    start_line: int
+    end_line: int
+    symbol: str
+    parent_symbol: str | None
+    kind: str
+    text: str
+    content_hash: str
+    diagnostic: str | None
+
+
+class RetrievalQuery(TypedDict):
+    text: str
+    mode: Literal["literal", "bm25", "hybrid"]
+    limit: int
+    token_budget: int
+
+
+class RetrievedEvidence(CodeChunk):
+    id: str
+    commit: str
+    path: str
+    score: float
+    sources: list[str]
+
+
 class ProcessResult(TypedDict):
     exit_code: int | None
     timed_out: bool
@@ -42,6 +68,7 @@ class ProjectProfile(TypedDict):
     pytest_args: list[str]
     regression: list[str]
     timeout: float
+    embedding_model: str | None
 
 
 class RunManifest(TypedDict):
@@ -61,6 +88,8 @@ class RunManifest(TypedDict):
     timeout: float
     targets: list[str]
     model: str | None
+    retrieval_mode: NotRequired[str | None]
+    embedding_model: NotRequired[str | None]
     input_log: str | None
     environment_fingerprint: NotRequired[str]
 

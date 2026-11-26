@@ -86,6 +86,20 @@ uv run ci-repair resume <task_id>
 
 LangGraph 把任务状态存进 SQLite。完成验证的候选会被记住，恢复后从待执行的节点继续。验收通过的修复经验可以在新任务中按同一仓库、用例名和失败特征检索，帮助模型定位。使用 `--no-memory` 可关闭本次任务的历史检索和写入。
 
+### 从失败用例检索源码
+
+模型修复默认启用 `--retrieval bm25`。Agent 从复现时的断言和测试节点提取查询，使用 AST 把失败提交中跟踪的 Python 文件切成函数、方法、类和模块代码块。SQLite FTS5 负责 BM25 排序，Agent 同时匹配完整符号名，并沿可解析的静态导入最多追两跳。相同的 Git blob 可以跨提交复用解析结果。再次修复同一个提交时，Agent 可以直接重用索引。
+
+模型先收到在上下文预算内选出的源码，再通过 function calling 选择 `list_files`、`search_symbols`、`retrieve_code`、`read_file`、`search_code` 或 `git_diff`。例如结算测试只显示 `checkout_total(200, 30)` 算错，检索会找到调用方和它引用的 `delivery.shipping_fee`，模型可以打开具体行验证免运费门槛。补丁仍要通过目标与回归测试。源码索引与只读工具都使用失败提交，当前目录里的未提交修改不会出现在证据中。
+
+```powershell
+uv run ci-repair --state-dir .ci-repair/checkout-rag fix --repo . --test 'examples/checkout/test_checkout.py::test_discount_keeps_free_shipping' --regression examples/checkout --no-memory
+```
+
+在对应任务的 `report.json` 中打开 `retrieval` 引用的 JSON。每条记录包含查询、提交、命中片段、召回来源、实际放进上下文的片段、估算的上下文大小和索引用时。上下文预算用 UTF-8 字节数近似约束。候选的 `evidence` 会校验文件及行号，超出源码范围的引用放入 `unverified_evidence`。静态导入只提供调用线索，动态导入与运行时分派仍需通过源码和测试核实。索引处理不超过 512 KiB 的 Python 文件。
+
+`--retrieval literal` 可用作对照，只按字面搜索首个调用名或标识符。显式传 `--retrieval hybrid --embedding-model provider:model` 可开启向量检索，使用余弦相似度召回和 RRF 排名融合。模型 ID 也可通过 `CI_REPAIR_EMBEDDING_MODEL` 或项目配置中的 `embedding_model` 设置。选用远程向量服务时，查询和尚未缓存的源码片段会发送给该服务。默认 BM25 和 `--patch` 模式均无需向量服务。
+
 ### 验证和评测
 
 ```powershell
@@ -95,6 +109,12 @@ uv run python evals/run.py --output .ci-repair/eval-live --model $env:CI_REPAIR_
 ```
 
 自动化测试覆盖逐用例结果、工具调用、补丁验收、两份独立仓库和进程退出后恢复。评测脚本准备 20 个合成案例，覆盖 5 类缺陷。离线模式使用已知补丁检查评测流程。模型模式比较批量候选、顺序重试和历史记忆，并用模型未见过的测试验收输出。结果写入 `results.json` 和 `summary.json`。
+
+下面的评测从指定提交重新运行运费和结算的失败测试，再按标注的文件及函数计算进入上下文的 Recall@6。结果写入指定目录的 `results.json`，同时保存检索耗时和上下文大小。加 `--embedding-model provider:model` 可测混合检索，加 `--repair-model provider:model` 会用同一个生成模型比较各检索模式的补丁验收结果。两种参数分别需要各自的服务凭据。
+
+```powershell
+uv run python evals/retrieval.py --output .ci-repair/retrieval-eval --top-k 6
+```
 
 GitHub Actions 的 [CI Repair Agent baseline](.github/workflows/ci-repair-demo.yml) 会在结算示例代码推送时运行结算用例。要建立两组模型基线，在 GitHub 的 **Actions → CI Repair Agent baseline → Run workflow** 选择 `main` 并运行。运费 `shipping` 和结算 `checkout` 各有一个任务，分别采集 pytest 失败日志、调用同一个 Agent CLI 并验收候选补丁。
 

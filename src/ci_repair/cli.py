@@ -40,6 +40,10 @@ def parser() -> argparse.ArgumentParser:
     fix.add_argument("--commit", help="Commit tested by CI; defaults to local HEAD")
     fix.add_argument("--test", action="append", default=[], help="Exact failed pytest node ID; repeatable")
     fix.add_argument("--model", default=os.environ.get("CI_REPAIR_MODEL"), help="LangChain provider:model identifier")
+    fix.add_argument("--retrieval", choices=["literal", "bm25", "hybrid"], default="bm25",
+                     help="Source retrieval strategy for model repair")
+    fix.add_argument("--embedding-model", default=os.environ.get("CI_REPAIR_EMBEDDING_MODEL"),
+                     help="LangChain provider:model identifier for explicit hybrid retrieval")
     fix.add_argument("--strategy", choices=["batch", "sequential"], help="Defaults to batch, or sequential for --seed-patch")
     fix.add_argument("--no-memory", action="store_true")
     patches = fix.add_mutually_exclusive_group()
@@ -76,6 +80,9 @@ def new_state(args, log: str) -> dict:
         raise ValueError("Supply at most two candidate patches")
     if not args.patch and not args.model:
         raise ValueError("Set CI_REPAIR_MODEL or pass --model provider:model; --patch verifies offline")
+    embedding_model = args.embedding_model or profile.get("embedding_model")
+    if not args.patch and args.retrieval == "hybrid" and not embedding_model:
+        raise ValueError("Hybrid retrieval requires --embedding-model provider:model")
     strategy = args.strategy or ("sequential" if args.seed_patch else "batch")
     if args.seed_patch and strategy != "sequential":
         raise ValueError("--seed-patch requires sequential repair")
@@ -89,6 +96,8 @@ def new_state(args, log: str) -> dict:
             "commit_source": "argument" if args.commit else "CI log" if log_commit else "local HEAD",
             "targets": targets,
             "model": args.model if not args.patch else None,
+            "retrieval_mode": args.retrieval if not args.patch else None,
+            "embedding_model": embedding_model if not args.patch and args.retrieval == "hybrid" else None,
             "strategy": strategy,
             "use_memory": not args.no_memory,
         },
