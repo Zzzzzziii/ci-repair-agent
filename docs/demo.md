@@ -9,3 +9,7 @@
 | 跨 runner 恢复 | 新作业下载 checkpoint，核对提交和证据，继续同一个任务，让模型根据第一轮结果提出修改 | `shipping-resumed` 内的 `artifacts/recovery/`、`events.jsonl` 和最终报告 |
 
 核对两份 shipping 报告的任务 ID 和被测 SHA。恢复记录的 `completed_candidates` 应为 1；后续候选的验证结果说明第二轮改动是否通过回归。跨仓库示例的被测 SHA 包含演示用例，可通过其父提交回溯到[上游故障版本](https://github.com/more-itertools/more-itertools/commit/5d946b3590bfe92f1465c1b9b9830dd434745c84)。
+
+## 首次远端运行记录
+
+在 `6e43d2b` 上，shipping 的初始补丁被回归测试拦截。新 runner 下载了检查点并恢复任务 `7d1110aa-f928-57fb-9b5d-c083a6ce7346`。恢复记录显示已验收过 1 个候选、下一节点为 `retrieve`、校验通过。随后模型两次未给出可执行决策，以 `invalid_decision` 结束。上游示例也复现了预期的 1 失败和 1 通过，模型在同一协议检查处被拒绝。[首次演示及三份报告](https://github.com/Zzzzzziii/ci-repair-agent/actions/runs/45829482474)

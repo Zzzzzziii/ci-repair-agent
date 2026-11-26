@@ -192,38 +192,48 @@ def decide(task, directory, messages, tools, budget) -> ModelDecision:
         binding["function"].update(name=name, description=description)
         bindings.append(binding)
     options = {"temperature": 0, "max_retries": 0, "timeout": min(60, budget.check_budget())}
+    binding_options = {}
     if task["model"].startswith(("deepseek:", "deepseek-")):
         options["extra_body"] = {"thinking": {"type": "disabled"}}
-    model, _ = run_model_step(lambda: init_chat_model(task["model"], **options).bind_tools(bindings),
+        binding_options["tool_choice"] = "required"
+    model, _ = run_model_step(lambda: init_chat_model(task["model"], **options).bind_tools(bindings, **binding_options),
                               "initialize", task, directory)
     identifier = budget.reserve_call("model_calls")
     reply, _ = run_model_step(lambda: model.invoke(messages), "decision", task, directory, call_id=identifier)
     budget.record_usage(identifier, reply.usage_metadata)
     result = {"action": "invalid", "name": "", "args": {}, "tool_call_id": "", "model_call_id": identifier}
-    if len(reply.tool_calls) != 1 or reply.invalid_tool_calls:
-        return result
-    call, = reply.tool_calls
+    if reply.invalid_tool_calls:
+        return {**result, "problem": "A tool call had malformed arguments."}
+    if not reply.tool_calls:
+        return {**result, "problem": "No function call was returned."}
+    read_names = {tool.name for tool in tools}
+    if len(reply.tool_calls) > 1 and any(call["name"] not in read_names for call in reply.tool_calls):
+        return {**result, "problem": "A patch or stop decision must be sent alone."}
+    # The graph records one observation per step. When given several reads, answer the first
+    # and let the next model step choose any remaining reads using that observation.
+    call = reply.tool_calls[0]
     name = call["name"]
     args = call["args"]
     try:
         if name == "submit_patch":
             candidate = Candidate.model_validate(args)
             if not candidate.diff.strip() or not candidate.hypothesis.strip():
-                return result
+                return {**result, "problem": "submit_patch requires a nonempty hypothesis and unified diff."}
             action, args = "propose", candidate.model_dump()
         elif name == "stop_repair":
             reason = StopReason.model_validate(args).reason.strip()
             if not reason:
-                return result
+                return {**result, "problem": "stop_repair requires a nonempty reason."}
             action, args = "stop", {"reason": reason}
         else:
             item = next((item for item in tools if item.name == name), None)
             if item is None:
-                return result
+                return {**result, "problem": "Unknown function. Select one of the declared tools."}
             item.get_input_schema().model_validate(args)
             action = "tool"
-    except ValidationError:
-        return result
+    except ValidationError as error:
+        fields = ", ".join(".".join(map(str, e["loc"])) for e in error.errors(include_input=False))
+        return {**result, "problem": f"Invalid {name} arguments. Check these schema fields: {fields}."}
     return {**result, "action": action, "name": name, "args": args, "tool_call_id": call["id"] or identifier}
 
 

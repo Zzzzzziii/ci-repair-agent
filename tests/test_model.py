@@ -7,6 +7,37 @@ from ci_repair import model
 from ci_repair.workspace import commit_id, git
 
 
+def test_sequential_decision_handles_parallel_reads_and_reports_malformed_steps(tmp_path, monkeypatch):
+    from langchain_core.tools import tool
+    from ci_repair.budget import Budget, DEFAULTS
+
+    @tool
+    def inspect_source(path: str) -> str:
+        """Read a source file."""
+        return path
+
+    calls = [{"id": name, "name": "inspect_source", "args": {"path": name}} for name in ["first", "second"]]
+    replies = iter([AIMessage(content="", tool_calls=calls), AIMessage(content="text"),
+                    AIMessage(content="", tool_calls=[*calls, {"id": "stop", "name": "stop_repair", "args": {"reason": "x"}}])])
+    class Client:
+        def bind_tools(self, bindings, *, tool_choice):
+            assert tool_choice == "required"
+            return self
+
+        def invoke(self, messages):
+            return next(replies)
+
+    monkeypatch.setattr(model, "init_chat_model", lambda *args, **kwargs: Client())
+    task = {"model": "deepseek:deepseek-flash", "id": "test"}
+    budget = Budget(tmp_path, DEFAULTS)
+    def decision():
+        return model.decide(task, tmp_path, [], [inspect_source], budget)
+    first = decision()
+    assert first["action"] == "tool" and first["args"] == {"path": "first"}
+    assert "No function call" in decision()["problem"]
+    assert "sent alone" in decision()["problem"]
+
+
 @pytest.mark.parametrize("model_name", ["deepseek:deepseek-flash", "deepseek-flash"])
 def test_model_uses_real_repository_tool_before_proposal(tmp_path, monkeypatch, model_name):
     git(tmp_path, "init", "--quiet")

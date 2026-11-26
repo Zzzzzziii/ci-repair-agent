@@ -85,11 +85,12 @@ def register_sequential(graph, record_node, storage, memory, adapter):
         if decision["action"] == "stop":
             updates.update(status="rejected", reason_code="model_stopped", reason=decision["args"]["reason"])
         elif decision["action"] == "invalid":
+            problem = decision.get("problem", "Invalid function call.")
             if state["corrections"]:
-                updates.update(status="rejected", reason_code="invalid_decision", reason="Invalid decision after correction")
+                updates.update(status="rejected", reason_code="invalid_decision", reason=f"Invalid decision after correction: {problem}")
             else:
                 updates.update(corrections=1, observations=[*state["observations"], {
-                    "feedback": "Return exactly one valid function call with all required arguments."
+                    "feedback": f"{problem} Return exactly one valid function call with all required arguments."
                 }])
         return updates
 
