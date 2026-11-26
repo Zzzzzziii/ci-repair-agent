@@ -63,6 +63,7 @@ def test_reports_real_execution_states(tmp_path, monkeypatch):
     adapter = PytestAdapter(Path(sys.executable), tmp_path, 15, task_directory=task_directory)
     result = adapter.run(tmp_path, [sample.name])
     assert result["status"] == "failed", result
+    assert result["failure_kind"] == "test_failure"
     assert Path(result["command"][0]) == Path(sys.executable)
     assert result["command"][-1] == sample.name
     assert Path(result["cwd"]) == tmp_path
@@ -79,11 +80,19 @@ def test_reports_real_execution_states(tmp_path, monkeypatch):
     sample.write_text("import missing_test_dependency\n", encoding="utf-8")
     collection = adapter.run(tmp_path, [sample.name])
     assert collection["status"] == "error"
+    assert collection["failure_kind"] == "missing_dependency"
+    assert collection["missing_dependencies"][0]["module"] == "missing_test_dependency"
+    assert collection["missing_dependencies"][0]["phase"] == "collect"
     assert "missing_test_dependency" in collection["collection_errors"][0]
+    sample.write_text("def test_incomplete(\n", encoding="utf-8")
+    invalid = adapter.run(tmp_path, [sample.name])
+    assert invalid["failure_kind"] == "collection_error"
+    assert invalid["missing_dependencies"] == []
     timed_out = PytestAdapter(
         Path(sys.executable), tmp_path, 0.001, task_directory=task_directory
     ).run(tmp_path, [sample.name])
     assert timed_out["status"] == "timeout"
+    assert timed_out["failure_kind"] == "timeout"
     assert (task_directory / timed_out["artifacts"]["stdout"]).is_file()
     assert (task_directory / timed_out["artifacts"]["stderr"]).is_file()
 
@@ -467,6 +476,83 @@ def test_config_uses_candidate_src(tmp_path, monkeypatch):
     blocked_report = json.loads((storage / "runs" / task_id / "report.json").read_text(encoding="utf-8"))
     assert blocked_report["status"] == "blocked"
     assert blocked_report["reason"] == "Project imports were not observed: unobserved_project_fixture"
+
+
+@pytest.mark.parametrize(("directory", "source_directory"), [
+    (".", "."), (".", "src"), ("services/shop", "services/shop/src"),
+], ids=["flat", "src", "subproject"])
+def test_repair_uses_declared_layout(tmp_path, directory, source_directory):
+    fixture = tmp_path / "fixture"
+    source = Path(source_directory) / "sample_price.py"
+    (fixture / source).parent.mkdir(parents=True)
+    (fixture / source).write_text("price = 5\n", encoding="utf-8")
+    tests = fixture / directory / "tests"
+    tests.mkdir(parents=True)
+    (tests / "test_price.py").write_text(
+        "from sample_price import price\n\n"
+        "def test_price():\n    assert price == 9\n\n"
+        "def test_positive():\n    assert price > 0\n", encoding="utf-8",
+    )
+    (fixture / ".ci-repair.toml").write_text(
+        f'cwd = "{directory}"\nsource_paths = ["{source_directory}"]\n'
+        'import_modules = ["sample_price"]\nregression = ["tests"]\n', encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    make_repository(repo, fixture)
+    storage = tmp_path / "state"
+    patch = tmp_path / "price.diff"
+    create_patch(repo, source.as_posix(), "price = 9\n", patch)
+    result = cli(storage, "fix", "--repo", str(repo), "--test", "tests/test_price.py::test_price",
+                 "--patch", str(patch))
+    assert result.returncode == 0, result.stdout + result.stderr
+    report_path, = (storage / "runs").glob("*/report.json")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    baseline = report["reference"]["target"]
+    candidate = report["validations"][0]["regression"]
+    assert (baseline["status"], candidate["status"], report["status"]) == ("failed", "passed", "accepted")
+    for run in (baseline, candidate):
+        imported = run["imports"]["sample_price"]
+        origin, = imported["origins"]
+        assert imported["status"] == "in_worktree"
+        assert Path(origin).relative_to(run["cwd"]) == source.relative_to(directory)
+
+
+def test_repair_reports_unreproduced_skip_and_missing_dependency(tmp_path):
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "price.py").write_text("price = 5\n", encoding="utf-8")
+    (fixture / "test_price.py").write_text(
+        "import pytest\nfrom price import price\n\n"
+        'def test_price():\n    if price is None:\n        pytest.skip("fixture unavailable")\n    assert price == 9\n\n'
+        "def test_positive():\n    assert price > 0\n", encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    make_repository(repo, fixture)
+    skip, missing = tmp_path / "skip.diff", tmp_path / "missing.diff"
+    create_patch(repo, "price.py", "price = None\n", skip)
+    create_patch(repo, "price.py", "import missing_pricing_dependency\nprice = 9\n", missing)
+    first_storage = tmp_path / "unreproduced"
+    unreproduced = cli(first_storage, "fix", "--repo", str(repo), "--test", "test_price.py::test_positive",
+                       "--patch", str(skip))
+    assert unreproduced.returncode == 2, unreproduced.stdout + unreproduced.stderr
+    first_path, = (first_storage / "runs").glob("*/report.json")
+    report = json.loads(first_path.read_text(encoding="utf-8"))
+    assert report["reason_code"] == "failure_not_reproduced"
+    assert report["reference"]["target_outcomes"] == {"test_price.py::test_positive": "passed"}
+
+    storage = tmp_path / "state"
+    result = cli(storage, "fix", "--repo", str(repo), "--test", "test_price.py::test_price",
+                 "--patch", str(skip), "--patch", str(missing))
+    assert result.returncode == 2, result.stdout + result.stderr
+    path, = (storage / "runs").glob("*/report.json")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    skipped, blocked = report["validations"]
+    assert skipped["status"] == "rejected"
+    assert skipped["target_outcomes"] == {"test_price.py::test_price": "skipped"}
+    assert report["status"] == blocked["status"] == "blocked"
+    assert report["reason_code"] == blocked["reason_code"] == "missing_dependency"
+    assert "missing_pricing_dependency" in report["reason"]
+    assert not path.with_name("fix.diff").exists()
 
 
 @pytest.mark.parametrize(("purpose", "status", "error_type"), [

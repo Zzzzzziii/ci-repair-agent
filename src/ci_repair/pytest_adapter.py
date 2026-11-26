@@ -14,6 +14,7 @@ FAILED_NODE = re.compile(
     r"(.+?::.+?)(?:[ \t]+-[ \t]+.*)?[ \t]*$",
     re.MULTILINE,
 )
+PYTEST_EXIT_ERRORS = {2: "interrupted", 3: "pytest_internal_error", 4: "pytest_usage_error"}
 
 
 def normalized_node(node: str) -> str:
@@ -44,6 +45,7 @@ def read_evidence(result: dict, path: Path, tree: Path) -> None:
     result["collected"] = evidence["collected"]
     result["session_finished"] = evidence["session_finished"]
     result["collection_errors"] = evidence["collection_errors"]
+    result["missing_dependencies"] = evidence["missing_dependencies"]
     result["runtime"] = evidence["runtime"]
     tree = tree.resolve()
     imports = {}
@@ -59,17 +61,32 @@ def read_evidence(result: dict, path: Path, tree: Path) -> None:
     result["tests"] = {
         node: {"status": test_status(phases), "phases": phases} for node, phases in phases_by_node.items()
     }
-    if result["status"] == "timeout" or not result["session_finished"]:
+    if result["status"] == "timeout":
         return
 
     statuses = {test["status"] for test in result["tests"].values()}
-    if result["collection_errors"] or "error" in statuses:
-        return
     exit_code = result["exit_code"]
-    if exit_code == 0 and (not statuses or "not_run" in statuses):
-        result["status"] = "incomplete"
+    if result["missing_dependencies"]:
+        result["failure_kind"] = "missing_dependency"
+    elif result["collection_errors"]:
+        result["failure_kind"] = "collection_error"
+    elif exit_code in PYTEST_EXIT_ERRORS:
+        result["failure_kind"] = PYTEST_EXIT_ERRORS[exit_code]
+    elif "error" in statuses:
+        result["failure_kind"] = "fixture_error"
+    elif not result["session_finished"]:
+        result["failure_kind"] = "session_incomplete"
+    elif exit_code == 0:
+        if not statuses or "not_run" in statuses:
+            result.update(status="incomplete", failure_kind="incomplete")
+        else:
+            result.update(status="passed", failure_kind=None)
+    elif exit_code == 1:
+        result.update(status="failed", failure_kind="test_failure")
+    elif exit_code == 5:
+        result.update(status="no_tests", failure_kind="no_tests")
     else:
-        result["status"] = {0: "passed", 1: "failed", 5: "no_tests"}.get(exit_code, "error")
+        result["failure_kind"] = "process_error"
 
 
 class PytestAdapter:
@@ -88,11 +105,13 @@ class PytestAdapter:
         start = monotonic()
         result = {
             "status": "error",
+            "failure_kind": "runner_error",
             "exit_code": None,
             "tests": {},
             "collected": None,
             "session_finished": False,
             "collection_errors": [],
+            "missing_dependencies": [],
             "output": "",
             "cwd": str(directory),
         }
@@ -123,13 +142,15 @@ class PytestAdapter:
                 result["exit_code"] = process["exit_code"]
                 result["output"] = process["output"]
                 if process["timed_out"]:
-                    result["status"] = "timeout"
+                    result.update(status="timeout", failure_kind="timeout")
                     notice = f"pytest exceeded {self.timeout:g}s\n"
                     result["output"] = (notice + process["output"][-(OUTPUT_LIMIT - len(notice)):]).rstrip()
                     if process["cleanup_error"]:
                         result["cleanup_error"] = process["cleanup_error"]
                 if report.is_file():
                     read_evidence(result, report, tree)
+                elif not process["timed_out"]:
+                    result["failure_kind"] = "report_unavailable"
         except (OSError, ValueError) as error:
             result["output"] = str(error)
         result["seconds"] = round(monotonic() - start, 3)
