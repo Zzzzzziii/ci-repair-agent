@@ -31,7 +31,8 @@ def import_problem(*runs: dict, require_all: bool = False) -> str | None:
 
 
 def baseline(adapter: PytestAdapter, task: dict, scratch: Path) -> dict:
-    with worktree(Path(task["repository"]), task["commit"], scratch) as tree:
+    with worktree(Path(task["repository"]), task["commit"], scratch,
+                  task_directory=adapter.task_directory, purpose="baseline") as tree:
         directory = within(tree, task["cwd"])
         target = adapter.run(directory, task["targets"], tree=tree)
         if target["status"] not in VALID_TEST_RUN:
@@ -65,8 +66,15 @@ def collected_tests(run: dict) -> set[str] | None:
     return set(collected or ()).union(run["tests"])
 
 
+def environment_changed(baseline_run: dict, candidate_run: dict) -> bool:
+    expected = baseline_run.get("runtime", {}).get("environment_fingerprint")
+    observed = candidate_run.get("runtime", {}).get("environment_fingerprint")
+    return bool(expected and expected != observed)
+
+
 def verify(adapter: PytestAdapter, task: dict, reference: dict, patch: str, scratch: Path) -> dict:
-    with worktree(Path(task["repository"]), task["commit"], scratch) as tree:
+    with worktree(Path(task["repository"]), task["commit"], scratch,
+                  task_directory=adapter.task_directory, purpose="candidate") as tree:
         directory = within(tree, task["cwd"])
         test_paths = [
             (PurePosixPath(task["cwd"]) / node.partition("::")[0]).as_posix()
@@ -80,6 +88,11 @@ def verify(adapter: PytestAdapter, task: dict, reference: dict, patch: str, scra
         target = adapter.run(directory, task["targets"], tree=tree)
         if target["status"] not in VALID_TEST_RUN:
             return {"status": "blocked", "target": target, **execution_problem(target, "Target execution")}
+        if environment_changed(reference["target"], target):
+            return {
+                "status": "blocked", "target": target, "reason_code": "environment_changed",
+                "reason": "Target test environment changed since the baseline",
+            }
         if problem := import_problem(target):
             return {"status": "blocked", "reason": problem, "reason_code": "import_origin", "target": target}
         target_outcomes = {node: status_of(target, node) for node in task["targets"]}
@@ -94,6 +107,11 @@ def verify(adapter: PytestAdapter, task: dict, reference: dict, patch: str, scra
             return {
                 "status": "blocked", "target": target, "regression": regression,
                 **execution_problem(regression, "Regression execution"),
+            }
+        if environment_changed(reference["regression"], regression):
+            return {
+                "status": "blocked", "target": target, "regression": regression,
+                "reason_code": "environment_changed", "reason": "Regression test environment changed since the baseline",
             }
         if problem := import_problem(target, regression, require_all=True):
             return {

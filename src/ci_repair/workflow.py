@@ -69,6 +69,7 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
             task_directory=storage / "runs" / task["id"],
             source_paths=task.get("source_paths"),
             import_modules=task.get("import_modules"),
+            pytest_args=task.get("pytest_args"),
         )
 
     def reproduce(state: RepairState):
@@ -96,7 +97,8 @@ def build_workflow(checkpointer, storage: Path, *, pause_after_candidate: bool =
             if result["status"] == "rejected"
         ]
         task_directory = storage / "runs" / task["id"]
-        with worktree(Path(task["repository"]), task["commit"], scratch) as tree:
+        with worktree(Path(task["repository"]), task["commit"], scratch,
+                      task_directory=task_directory, purpose="exploration") as tree:
             if feedback:
                 record_retry_feedback(task_directory, feedback)
             proposal = propose(

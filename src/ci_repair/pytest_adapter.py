@@ -93,6 +93,7 @@ class PytestAdapter:
     def __init__(
         self, interpreter: Path, scratch: Path, timeout: float, *, task_directory: Path | None = None,
         source_paths: list[str] | None = None, import_modules: list[str] | None = None,
+        pytest_args: list[str] | None = None,
     ):
         self.interpreter = interpreter
         self.scratch = scratch
@@ -100,6 +101,7 @@ class PytestAdapter:
         self.task_directory = task_directory
         self.source_paths = source_paths or []
         self.import_modules = import_modules or []
+        self.pytest_args = pytest_args or []
 
     def run(self, directory: Path, selectors: list[str], *, tree: Path | None = None) -> dict:
         start = monotonic()
@@ -125,7 +127,7 @@ class PytestAdapter:
                 stderr = run_directory / "stderr.log"
                 command = [
                     str(self.interpreter), "-B", "-X", "utf8", str(worker), str(report),
-                    json.dumps(self.import_modules), *selectors,
+                    json.dumps({"imports": self.import_modules, "pytest_args": self.pytest_args}), *selectors,
                 ]
                 result["command"] = command
                 try:

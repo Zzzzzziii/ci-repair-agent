@@ -14,6 +14,7 @@ EVENTS_FILENAME = "events.jsonl"
 MODEL_ARTIFACTS = Path("artifacts") / "model"
 TOOL_ARTIFACTS = Path("artifacts") / "tools"
 FEEDBACK_ARTIFACTS = Path("artifacts") / "feedback"
+WORKTREE_ARTIFACTS = Path("artifacts") / "worktrees"
 
 
 def atomic_write(path: Path, content: bytes) -> None:
@@ -49,6 +50,7 @@ def record_run_inputs(directory: Path, task: dict, log: bytes | None) -> None:
         "python": task["python"],
         "source_paths": task.get("source_paths", []),
         "import_modules": task.get("import_modules", []),
+        "pytest_args": task.get("pytest_args", []),
         "regression": task["regression"],
         "timeout": task["timeout"],
         "targets": task["targets"],
@@ -74,6 +76,12 @@ def record_retry_feedback(directory: Path, feedback: list[RepairFeedback]) -> No
     destination = directory / FEEDBACK_ARTIFACTS / f"after-candidate-{feedback[-1]['candidate']}.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     write_json(destination, {"schema_version": 1, "attempts": feedback})
+
+
+def record_worktree(directory: Path, record: dict) -> None:
+    destination = directory / WORKTREE_ARTIFACTS / f"{record['id']}.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    write_json(destination, record)
 
 
 def append_workflow_event(directory: Path, task_id: str, kind: WorkflowEventType, **details: object) -> None:
@@ -108,12 +116,20 @@ def record_candidate_diffs(directory: Path, candidates: list[dict]) -> list[dict
 
 def publish(directory: Path, state: dict, next_nodes: tuple, *, status: str, error: str | None = None) -> None:
     report = {**state, "status": status, "next": list(next_nodes)}
-    if (directory / MANIFEST_FILENAME).is_file():
+    manifest_path = directory / MANIFEST_FILENAME
+    if manifest_path.is_file():
         report["manifest"] = MANIFEST_FILENAME
+        runtime = state.get("reference", {}).get("target", {}).get("runtime", {})
+        if fingerprint := runtime.get("environment_fingerprint"):
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if "environment_fingerprint" not in manifest:
+                manifest["environment_fingerprint"] = fingerprint
+                write_json(manifest_path, manifest)
     if (directory / EVENTS_FILENAME).is_file():
         report["events"] = EVENTS_FILENAME
     for key, category in (
-        ("model_calls", MODEL_ARTIFACTS), ("tool_events", TOOL_ARTIFACTS), ("retry_feedback", FEEDBACK_ARTIFACTS),
+        ("model_calls", MODEL_ARTIFACTS), ("tool_events", TOOL_ARTIFACTS),
+        ("retry_feedback", FEEDBACK_ARTIFACTS), ("worktrees", WORKTREE_ARTIFACTS),
     ):
         paths = sorted(
             path.relative_to(directory).as_posix()
@@ -122,6 +138,13 @@ def publish(directory: Path, state: dict, next_nodes: tuple, *, status: str, err
         )
         if paths:
             report[key] = paths
+    worktree_issues = []
+    for path in report.get("worktrees", []):
+        record = json.loads((directory / path).read_text(encoding="utf-8"))
+        if record["status"] != "removed":
+            worktree_issues.append({**record, "artifact": path})
+    if worktree_issues:
+        report["worktree_issues"] = worktree_issues
     if candidates := state.get("candidates"):
         candidate_records = record_candidate_diffs(directory, candidates)
         report["candidates"] = candidate_records

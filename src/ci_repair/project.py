@@ -11,7 +11,7 @@ from ci_repair.workspace import repository_path, within
 
 
 DEFAULT_CONFIG = ".ci-repair.toml"
-CONFIG_KEYS = {"cwd", "python", "source_paths", "import_modules", "regression", "timeout"}
+CONFIG_KEYS = {"cwd", "python", "source_paths", "import_modules", "pytest_args", "regression", "timeout"}
 PROJECT_PROBE = """
 import sys
 if sys.path and sys.path[0] == "":
@@ -52,7 +52,7 @@ def load_project_config(repository: Path, config: Path | None) -> tuple[Path | N
     for key in ("cwd", "python"):
         if key in settings and (not isinstance(settings[key], str) or not settings[key].strip()):
             raise ValueError(f"{key} in {path} must be a nonempty string")
-    for key in ("source_paths", "import_modules", "regression"):
+    for key in ("source_paths", "import_modules", "pytest_args", "regression"):
         if key in settings and (
             not isinstance(settings[key], list)
             or any(not isinstance(value, str) or not value.strip() for value in settings[key])
@@ -79,6 +79,7 @@ def resolve_project_profile(
     python: str | None = None,
     source_paths: list[str] | None = None,
     import_modules: list[str] | None = None,
+    pytest_args: list[str] | None = None,
     regression: list[str] | None = None,
     timeout: float | None = None,
 ) -> ProjectProfile:
@@ -102,6 +103,9 @@ def resolve_project_profile(
     for name in modules:
         if not all(part.isidentifier() for part in name.split(".")):
             raise ValueError(f"Expected a dotted Python module name: {name}")
+    options = pytest_args if pytest_args is not None else settings.get("pytest_args", [])
+    if "--" in options:
+        raise ValueError("pytest_args must not contain the -- selector separator")
     seconds = timeout if timeout is not None else settings.get("timeout", 120)
     if not 0 < seconds <= sys.float_info.max:
         raise ValueError("--timeout must be a positive finite number")
@@ -112,6 +116,7 @@ def resolve_project_profile(
         "python": str(Path(executable).absolute()),
         "source_paths": roots,
         "import_modules": list(dict.fromkeys(modules)),
+        "pytest_args": options,
         "regression": selectors,
         "timeout": seconds,
     }

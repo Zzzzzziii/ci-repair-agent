@@ -1,8 +1,11 @@
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import os
 from pathlib import Path, PurePosixPath
 import subprocess
 from uuid import uuid4
+
+from ci_repair.artifacts import record_worktree
 
 
 def git(repository: Path, *args: str, stdin: str | None = None) -> str:
@@ -33,16 +36,49 @@ def within(directory: Path, relative_path: str) -> Path:
 
 
 @contextmanager
-def worktree(repository: Path, commit: str, scratch: Path):
+def worktree(repository: Path, commit: str, scratch: Path, *, task_directory: Path | None = None,
+             purpose: str = "verification"):
     parent = scratch.resolve()
-    tree = (parent / f"worktree-{uuid4().hex}").resolve()
-    if not tree.is_relative_to(parent):
+    identifier = uuid4().hex
+    tree = parent / f"worktree-{identifier}"
+    if tree.resolve() != tree or not tree.is_relative_to(parent):
         raise ValueError("Invalid worktree path")
-    git(repository, "worktree", "add", "--detach", str(tree), commit)
+    expected = commit_id(repository, commit)
+    record = {
+        "id": identifier, "path": str(tree), "commit": expected, "purpose": purpose,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    def update(status: str, error: str | None = None):
+        if task_directory is not None:
+            record_worktree(task_directory, {
+                **record, "status": status, "error": error,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+    update("creating")
     try:
+        git(repository, "worktree", "add", "--detach", str(tree), expected)
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        update("create_failed", str(error))
+        raise
+    try:
+        record["created_at"] = datetime.now(timezone.utc).isoformat()
+        update("created")
+        if commit_id(tree, "HEAD") != expected:
+            raise ValueError(f"Worktree did not check out the expected commit: {expected}")
         yield tree
     finally:
-        git(repository, "worktree", "remove", "--force", str(tree))
+        try:
+            if tree.resolve() != tree or not tree.is_relative_to(parent):
+                raise ValueError(f"Worktree path changed before cleanup: {tree}")
+            git(repository, "worktree", "remove", "--force", str(tree))
+        except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+            update("cleanup_failed", str(error))
+            if task_directory is None:
+                raise
+        else:
+            update("removed")
 
 
 def protected_source(path: str, selectors: list[str]) -> bool:
