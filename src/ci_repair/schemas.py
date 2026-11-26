@@ -1,4 +1,4 @@
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 
 class ProcessResult(TypedDict):
@@ -6,6 +6,30 @@ class ProcessResult(TypedDict):
     timed_out: bool
     output: str
     cleanup_error: str | None
+
+
+class TestFailureEvidence(TypedDict):
+    node_id: str
+    status: str
+    detail: str
+
+
+class TestFeedback(TypedDict):
+    status: str
+    failures: list[TestFailureEvidence]
+    omitted_cases: int
+    output: str
+    artifacts: dict[str, str]
+
+
+class RepairFeedback(TypedDict):
+    candidate: int
+    hypothesis: str
+    diff: str
+    status: str
+    reason: str | None
+    target: NotRequired[TestFeedback]
+    regression: NotRequired[TestFeedback]
 
 
 class ProjectProfile(TypedDict):

@@ -6,13 +6,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
-from ci_repair.schemas import ModelCallRecord, RunManifest, ToolEvent, WorkflowEvent, WorkflowEventType
+from ci_repair.schemas import ModelCallRecord, RepairFeedback, RunManifest, ToolEvent, WorkflowEvent, WorkflowEventType
 
 
 MANIFEST_FILENAME = "manifest.json"
 EVENTS_FILENAME = "events.jsonl"
 MODEL_ARTIFACTS = Path("artifacts") / "model"
 TOOL_ARTIFACTS = Path("artifacts") / "tools"
+FEEDBACK_ARTIFACTS = Path("artifacts") / "feedback"
 
 
 def atomic_write(path: Path, content: bytes) -> None:
@@ -69,6 +70,12 @@ def record_tool_event(directory: Path, event: ToolEvent) -> None:
     write_json(destination, event)
 
 
+def record_retry_feedback(directory: Path, feedback: list[RepairFeedback]) -> None:
+    destination = directory / FEEDBACK_ARTIFACTS / f"after-candidate-{feedback[-1]['candidate']}.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    write_json(destination, {"schema_version": 1, "attempts": feedback})
+
+
 def append_workflow_event(directory: Path, task_id: str, kind: WorkflowEventType, **details: object) -> None:
     event: WorkflowEvent = {
         "schema_version": 1,
@@ -105,7 +112,9 @@ def publish(directory: Path, state: dict, next_nodes: tuple, *, status: str, err
         report["manifest"] = MANIFEST_FILENAME
     if (directory / EVENTS_FILENAME).is_file():
         report["events"] = EVENTS_FILENAME
-    for key, category in (("model_calls", MODEL_ARTIFACTS), ("tool_events", TOOL_ARTIFACTS)):
+    for key, category in (
+        ("model_calls", MODEL_ARTIFACTS), ("tool_events", TOOL_ARTIFACTS), ("retry_feedback", FEEDBACK_ARTIFACTS),
+    ):
         paths = sorted(
             path.relative_to(directory).as_posix()
             for path in (directory / category).glob("*.json")

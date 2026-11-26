@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from itertools import islice
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -12,7 +13,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from ci_repair.artifacts import record_model_call, record_tool_event
-from ci_repair.schemas import ModelCallPurpose, ModelCallRecord, ToolEvent
+from ci_repair.schemas import ModelCallPurpose, ModelCallRecord, RepairFeedback, ToolEvent
 from ci_repair.workspace import git, within
 
 
@@ -174,7 +175,7 @@ def execute_repository_tool(call, item, *, budget_available: bool, model_call_id
 
 
 def propose(model_name: str, tree: Path, task: dict, failure: str, history: list[dict],
-            feedback: list[dict], *, task_directory: Path | None = None) -> dict:
+            feedback: list[RepairFeedback], *, task_directory: Path | None = None) -> dict:
     model_options = {"temperature": 0, "max_retries": 1, "timeout": 60}
     if model_name.startswith(("deepseek:", "deepseek-")):
         # Structured patch output uses forced tool selection, which needs thinking disabled.
@@ -201,7 +202,7 @@ def propose(model_name: str, tree: Path, task: dict, failure: str, history: list
         HumanMessage(content=(
             f"Failed commit: {task['commit']}\nTests: {task['targets']}\n"
             f"Observed failure:\n{failure[:12000]}\nRelated verified historical repairs: {history}\n"
-            f"Rejected attempts in this task: {feedback}"
+            f"Rejected attempts in this task: {json.dumps(feedback, ensure_ascii=False)}"
         )),
     ]
     trace = []

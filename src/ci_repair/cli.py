@@ -39,9 +39,11 @@ def parser() -> argparse.ArgumentParser:
     fix.add_argument("--commit", help="Commit tested by CI; defaults to local HEAD")
     fix.add_argument("--test", action="append", default=[], help="Exact failed pytest node ID; repeatable")
     fix.add_argument("--model", default=os.environ.get("CI_REPAIR_MODEL"), help="LangChain provider:model identifier")
-    fix.add_argument("--strategy", choices=["batch", "sequential"], default="batch")
+    fix.add_argument("--strategy", choices=["batch", "sequential"], help="Defaults to batch, or sequential for --seed-patch")
     fix.add_argument("--no-memory", action="store_true")
-    fix.add_argument("--patch", type=Path, action="append", default=[], help="Verify a supplied diff without a model")
+    patches = fix.add_mutually_exclusive_group()
+    patches.add_argument("--patch", type=Path, action="append", default=[], help="Verify a supplied diff without a model")
+    patches.add_argument("--seed-patch", type=Path, help="Verify this first diff before a sequential model retry")
     fix.add_argument("--pause-after-candidate", action="store_true", help="Checkpoint after verifying one candidate")
     doctor = subcommands.add_parser("doctor", help="Check a project's Python environment and test plan")
     add_project_arguments(doctor)
@@ -73,6 +75,10 @@ def new_state(args, log: str) -> dict:
         raise ValueError("Supply at most two candidate patches")
     if not args.patch and not args.model:
         raise ValueError("Set CI_REPAIR_MODEL or pass --model provider:model; --patch verifies offline")
+    strategy = args.strategy or ("sequential" if args.seed_patch else "batch")
+    if args.seed_patch and strategy != "sequential":
+        raise ValueError("--seed-patch requires sequential repair")
+    initial_patches = [args.seed_patch] if args.seed_patch else args.patch
     return {
         "task": {
             **profile,
@@ -82,13 +88,13 @@ def new_state(args, log: str) -> dict:
             "commit_source": "argument" if args.commit else "CI log" if log_commit else "local HEAD",
             "targets": targets,
             "model": args.model if not args.patch else None,
-            "strategy": args.strategy,
+            "strategy": strategy,
             "use_memory": not args.no_memory,
         },
         "candidates": [
             {"hypothesis": f"Supplied patch {patch.name}", "evidence": [],
              "diff": patch.read_text(encoding="utf-8-sig")}
-            for patch in args.patch
+            for patch in initial_patches
         ],
         "status": "running",
     }

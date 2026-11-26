@@ -236,6 +236,82 @@ def test_resume_after_rejecting_regression(tmp_path):
     assert memory.search("another repository", "shipping threshold") == []
 
 
+def test_seeded_regression_drives_model_retry(tmp_path, monkeypatch):
+    fixture = tmp_path / "fixture"
+    example = Path("examples/shipping")
+    shutil.copytree(PROJECT / example, fixture / example, ignore=shutil.ignore_patterns("__pycache__"))
+    repo = tmp_path / "repo"
+    make_repository(repo, fixture)
+    storage = tmp_path / "state"
+    source = example / "shipping.py"
+    original = (repo / source).read_text(encoding="utf-8")
+    fixed = tmp_path / "fixed.diff"
+    create_patch(repo, source.as_posix(), original.replace("subtotal >", "subtotal >="), fixed)
+    captured_feedback = []
+
+    class ScriptedModel:
+        def bind_tools(self, tools):
+            return self
+
+        def with_structured_output(self, schema, *, include_raw):
+            assert schema is model.Proposal and include_raw
+            return self
+
+        def invoke(self, messages):
+            recorded = json.loads(messages[1].content.partition("Rejected attempts in this task: ")[2])
+            if str(messages[-1].content).startswith("Return up to"):
+                assert any(isinstance(message, ToolMessage) and "if remote_area:" in message.content for message in messages)
+                proposal = model.Proposal(candidates=[model.Candidate(
+                    hypothesis="Keep the remote fee before the free-shipping threshold check",
+                    evidence=[f"{source.as_posix()}:10"], diff=fixed.read_text(encoding="utf-8"),
+                )])
+                return {"parsed": proposal, "raw": AIMessage(content="")}
+            if isinstance(messages[-1], ToolMessage):
+                return AIMessage(content="The remote fee branch needs priority")
+
+            captured_feedback.append(recorded)
+            attempt, = recorded
+            failure, = attempt["regression"]["failures"]
+            assert attempt["target"]["status"] == "passed"
+            assert failure["node_id"].endswith("::test_remote_shipping_at_threshold_is_charged")
+            assert "Decimal('0')" in failure["detail"] and "Decimal('25')" in failure["detail"]
+            assert "test_shipping.py:" in failure["detail"]
+            saved, = (storage / "runs").glob("*/artifacts/feedback/after-candidate-1.json")
+            assert json.loads(saved.read_text(encoding="utf-8"))["attempts"] == recorded
+            return AIMessage(content="", tool_calls=[{
+                "id": "read-shipping", "name": "read_file", "args": {"path": source.as_posix(), "end_line": 14},
+            }])
+
+    monkeypatch.setattr(model, "init_chat_model", lambda *args, **kwargs: ScriptedModel())
+    seed = PROJECT / "evals/fixtures/shipping-regression.diff"
+    assert main([
+        "--state-dir", str(storage), "fix", "--repo", str(repo),
+        "--test", f"{example.as_posix()}/test_shipping.py::test_standard_shipping_at_threshold_is_free",
+        "--regression", example.as_posix(), "--model", "deepseek:deepseek-flash", "--seed-patch", str(seed),
+        "--pause-after-candidate",
+    ]) == 0
+
+    report_path, = (storage / "runs").glob("*/report.json")
+    paused = json.loads(report_path.read_text(encoding="utf-8"))
+    assert paused["status"] == "paused"
+    assert paused["next"] == ["generate"]
+    assert paused["validations"][0]["status"] == "rejected"
+    assert not captured_feedback
+
+    assert main(["--state-dir", str(storage), "resume", paused["task"]["id"]]) == 0
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "accepted"
+    assert report["task"]["strategy"] == "sequential"
+    assert [validation["status"] for validation in report["validations"]] == ["rejected", "accepted"]
+    feedback_path, = report["retry_feedback"]
+    payload = json.loads((report_path.parent / feedback_path).read_text(encoding="utf-8"))
+    assert captured_feedback == [payload["attempts"]]
+    pytest_path = payload["attempts"][0]["regression"]["artifacts"]["pytest_report"]
+    assert (report_path.parent / pytest_path).is_file()
+    assert report["tool_trace"][0]["tool"] == "read_file"
+    assert "subtotal >=" in report_path.with_name("fix.diff").read_text(encoding="utf-8")
+
+
 def test_rejects_test_edit_and_accepts_cross_file_fix(tmp_path):
     repo = tmp_path / "checkout"
     make_repository(repo, PROJECT / "examples/checkout")
