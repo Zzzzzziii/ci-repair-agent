@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
 import sys
@@ -44,6 +45,64 @@ def cli(storage: Path, *args: str):
 
 def read_timeline(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_ci_reuse_outputs_and_sha(tmp_path):
+    repo = tmp_path / "shipping"
+    make_repository(repo, PROJECT / "examples/shipping")
+    sha = git(repo, "rev-parse", "HEAD").strip()
+    patch = tmp_path / "shipping.diff"
+    source = (repo / "shipping.py").read_text(encoding="utf-8")
+    create_patch(repo, "shipping.py", source.replace("> FREE_SHIPPING_THRESHOLD", ">= FREE_SHIPPING_THRESHOLD"), patch)
+    node = "test_shipping.py::test_standard_shipping_at_threshold_is_free"
+    log = tmp_path / "ci.log"
+    log.write_text(f"GITHUB_SHA={sha}\nFAILED {node}\n", encoding="utf-8")
+    receipt = tmp_path / "receipt.json"
+    args = ["--state-dir", str(tmp_path / "state"), "--result-file", str(receipt), "fix", "--repo", str(repo),
+            "--reuse-task", "--commit", sha, "--log", str(log), "--patch", str(patch), "--regression", "test_shipping.py"]
+    assert main(args) == 0
+    info = json.loads(receipt.read_text())
+    report = json.loads(Path(info["report"]).read_text(encoding="utf-8"))
+    markdown = Path(info["markdown"]).read_text(encoding="utf-8")
+    assert report["status"] == "accepted" and sha in markdown and node in markdown
+    events = Path(info["directory"]) / "events.jsonl"
+    before = events.read_bytes()
+    assert main(args) == 0 and events.read_bytes() == before
+    assert json.loads(receipt.read_text())["task_id"] == info["task_id"]
+    log.write_text(f"GITHUB_SHA={'0' * 40}\nFAILED {node}\n", encoding="utf-8")
+    assert main(args) == 2
+
+
+def test_action_reports_tested_pr_merge_commit(tmp_path):
+    repo = tmp_path / "shipping"
+    make_repository(repo, PROJECT / "examples/shipping")
+    base = git(repo, "rev-parse", "HEAD").strip()
+    identity = ("-c", "user.name=CI fixture", "-c", "user.email=ci@example.invalid")
+    git(repo, "checkout", "-qb", "proposal")
+    git(repo, *identity, "commit", "--allow-empty", "-qm", "Proposed change")
+    head = git(repo, "rev-parse", "HEAD").strip()
+    git(repo, "checkout", "--detach", base)
+    git(repo, *identity, "merge", "--no-ff", "-qm", "PR test merge", head)
+    merge = git(repo, "rev-parse", "HEAD").strip()
+    assert git(repo, "show", "-s", "--format=%P", merge).split() == [base, head]
+
+    patch = tmp_path / "fix.diff"
+    code = (repo / "shipping.py").read_text(encoding="utf-8")
+    create_patch(repo, "shipping.py", code.replace("subtotal >", "subtotal >="), patch)
+    log = tmp_path / "ci.log"
+    baseline = subprocess.run([sys.executable, "-m", "pytest", "-q", "test_shipping.py"],
+                              cwd=repo, capture_output=True, text=True, timeout=30)
+    assert baseline.returncode == 1
+    log.write_text(f"GITHUB_SHA={merge}\n{baseline.stdout}", encoding="utf-8")
+    receipt = tmp_path / "receipt.json"
+    env = {"REPAIR_REPO": str(repo), "REPAIR_SHA": merge, "REPAIR_LOG": str(log), "REPAIR_PYTHON": sys.executable,
+           "REPAIR_STATE": str(tmp_path / "state"), "REPAIR_REGRESSION": "test_shipping.py", "REPAIR_PATCH": str(patch)}
+    arguments = runpy.run_path(str(PROJECT / "action/run.py"))["arguments"]
+    with pytest.raises(ValueError, match="Check out the commit"):
+        arguments({**env, "REPAIR_SHA": head}, receipt)
+    assert main(arguments(env, receipt)) == 0
+    report = json.loads(Path(json.loads(receipt.read_text())["report"]).read_text(encoding="utf-8"))
+    assert report["task"]["commit"] == merge and report["status"] == "accepted"
 
 
 def test_reports_real_execution_states(tmp_path, monkeypatch):
@@ -260,7 +319,8 @@ def test_seeded_regression_drives_model_retry(tmp_path, monkeypatch, decision):
     captured_feedback = []
 
     class ScriptedModel:
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, *, tool_choice):
+            assert tool_choice == "required"
             return self
 
         def invoke(self, messages):

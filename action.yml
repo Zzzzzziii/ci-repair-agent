@@ -1,0 +1,69 @@
+name: CI Repair Agent
+description: Reproduce a trusted pytest failure at its tested commit and verify candidate repairs
+inputs:
+  repository:
+    description: Path to the checked-out target repository
+    default: '.'
+  failed-sha:
+    description: Full commit SHA used by the failing test job
+    required: true
+  log:
+    description: Path to the pytest log with FAILED node IDs
+    required: true
+  config:
+    description: Optional target project TOML path
+  target-python:
+    description: Python with the target project's test dependencies
+    required: true
+  model:
+    description: LangChain provider and model identifier
+  regression:
+    description: Regression selectors, one per line (defaults to project config)
+  state-dir:
+    description: State directory restored by the caller
+    default: '.ci-repair'
+  budgets:
+    description: JSON object overriding model_calls, tool_calls, tests, candidates or seconds
+    default: '{}'
+  pause-after-candidate:
+    description: Save a checkpoint after candidate validation
+    default: 'false'
+  seed-patch:
+    description: Optional first candidate for a feedback experiment
+  patch:
+    description: Verify a supplied patch offline
+outputs:
+  task-id:
+    description: Stable repair task ID
+    value: ${{ steps.repair.outputs.task_id }}
+  status:
+    description: Repair status from the JSON report
+    value: ${{ steps.repair.outputs.status }}
+  report:
+    description: Absolute JSON report path
+    value: ${{ steps.repair.outputs.report }}
+  markdown:
+    description: Absolute Markdown report path
+    value: ${{ steps.repair.outputs.markdown }}
+  patch:
+    description: Absolute verified patch path when accepted
+    value: ${{ steps.repair.outputs.patch }}
+runs:
+  using: composite
+  steps:
+    - id: repair
+      shell: bash
+      env:
+        REPAIR_REPO: ${{ inputs.repository }}
+        REPAIR_SHA: ${{ inputs.failed-sha }}
+        REPAIR_LOG: ${{ inputs.log }}
+        REPAIR_CONFIG: ${{ inputs.config }}
+        REPAIR_PYTHON: ${{ inputs.target-python }}
+        REPAIR_MODEL: ${{ inputs.model }}
+        REPAIR_REGRESSION: ${{ inputs.regression }}
+        REPAIR_STATE: ${{ inputs.state-dir }}
+        REPAIR_BUDGETS: ${{ inputs.budgets }}
+        REPAIR_PAUSE: ${{ inputs.pause-after-candidate }}
+        REPAIR_SEED: ${{ inputs.seed-patch }}
+        REPAIR_PATCH: ${{ inputs.patch }}
+      run: python -I "$GITHUB_ACTION_PATH/action/run.py"

@@ -1,10 +1,9 @@
 name: CI Repair Agent baseline
-
 on:
   workflow_dispatch:
     inputs:
       feedback_demo:
-        description: Run the shipping regression feedback loop
+        description: Repair an upstream example and resume a shipping repair on a fresh runner
         type: boolean
         default: false
   push:
@@ -16,56 +15,138 @@ permissions:
 
 jobs:
   repair:
-    name: Repair ${{ matrix.example }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        example: ${{ fromJSON(github.event_name == 'push' && '["checkout"]' || inputs.feedback_demo && '["shipping"]' || '["shipping","checkout"]') }}
-    env:
-      EXAMPLE_DIR: examples/${{ matrix.example }}
+        example: ${{ fromJSON(github.event_name == 'push' && '["checkout"]' || inputs.feedback_demo && '["upstream","shipping"]' || '["shipping","checkout"]') }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: python -m pip install -e . "pytest>=8,<10"
-      - name: Record the failing test
+          python-version: '3.12'
+      - run: python -m pip install pytest==9.2.0
+      - if: matrix.example == 'upstream'
+        uses: actions/checkout@v4
+        with:
+          repository: more-itertools/more-itertools
+          ref: 5d946b3590bfe92f1465c1b9b9830dd434745c84
+          path: upstream
+          persist-credentials: false
+      - name: Record target, tested SHA and pytest evidence
         id: baseline
         shell: bash
-        run: |
-          set +e
-          python -m pytest -q "$EXAMPLE_DIR" 2>&1 | tee ci-error.log
-          test_exit=${PIPESTATUS[0]}
-          set -e
-          echo "test_exit=$test_exit" >> "$GITHUB_OUTPUT"
-          if [[ "$test_exit" != '0' && "$test_exit" != '1' ]]; then
-            echo "::error::pytest could not run the baseline for $EXAMPLE_DIR (exit $test_exit)"
-            exit "$test_exit"
-          fi
-          if [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' && "$test_exit" == '0' ]]; then
-            echo "::error::Expected a failing test in $EXAMPLE_DIR for the repair baseline"
-            exit 1
-          fi
-      - name: Repair and verify
-        if: steps.baseline.outputs.test_exit == '1'
         env:
-          CI_REPAIR_MODEL: ${{ vars.CI_REPAIR_MODEL || 'deepseek:deepseek-flash' }}
-          DEEPSEEK_API_KEY: ${{ secrets.API_KEY }}
-          FEEDBACK_DEMO: ${{ inputs.feedback_demo }}
+          EXAMPLE: ${{ matrix.example }}
         run: |
-          options=()
-          if [[ "$FEEDBACK_DEMO" == "true" ]]; then
-            options+=(--seed-patch evals/fixtures/shipping-regression.diff --no-memory)
+          repo=.
+          selector="examples/$EXAMPLE"
+          if [[ "$EXAMPLE" == upstream ]]; then
+            repo=upstream
+            selector=test_ci_repair_demo.py
+            cat > "$repo/$selector" <<'PY'
+          from more_itertools import interleave_evenly
+          def test_empty():
+              assert list(interleave_evenly([])) == []
+          def test_nonempty():
+              assert list(interleave_evenly([[8, 9]])) == [8, 9]
+          PY
+            cd upstream
+            git add test_ci_repair_demo.py
+            git -c user.name=Demo -c user.email=demo@example.invalid commit -qm 'Add public reproducer'
+            cd ..
           fi
-          ci-repair --state-dir .ci-repair fix --repo . --commit "$GITHUB_SHA" \
-            --log ci-error.log --regression "$EXAMPLE_DIR" "${options[@]}"
-      - name: Upload CI evidence and repair artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
+          sha=$(git -C "$repo" rev-parse HEAD)
+          echo "GITHUB_SHA=$sha" > ci-error.log
+          set +e
+          (cd "$repo" && python -m pytest -o addopts='' -q "$selector") >> ci-error.log 2>&1
+          rc=$?
+          set -e
+          cat ci-error.log
+          [[ "$rc" == 1 || ( "$rc" == 0 && "$GITHUB_EVENT_NAME" == push ) ]] || exit 2
+          printf 'sha=%s\nrepo=%s\nselector=%s\nrc=%s\n' "$sha" "$repo" "$selector" "$rc" >> "$GITHUB_OUTPUT"
+      - id: repair
+        if: steps.baseline.outputs.rc == '1'
+        uses: ./
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.API_KEY }}
         with:
-          name: repair-results-${{ matrix.example }}
+          repository: ${{ steps.baseline.outputs.repo }}
+          failed-sha: ${{ steps.baseline.outputs.sha }}
+          log: ci-error.log
+          target-python: python
+          model: ${{ vars.CI_REPAIR_MODEL || 'deepseek:deepseek-flash' }}
+          regression: ${{ steps.baseline.outputs.selector }}
+          budgets: '{"seconds":3600}'
+          seed-patch: ${{ inputs.feedback_demo && matrix.example == 'shipping' && 'evals/fixtures/shipping-regression.diff' || '' }}
+          pause-after-candidate: ${{ inputs.feedback_demo && matrix.example == 'shipping' }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: repair-${{ matrix.example }}
           include-hidden-files: true
           path: |
             ci-error.log
-            .ci-repair/runs/
+            .ci-repair/runs
+      - uses: actions/upload-artifact@v4
+        if: matrix.example == 'shipping' && inputs.feedback_demo && steps.repair.outputs.status == 'paused'
+        with:
+          name: shipping-checkpoint
+          include-hidden-files: true
+          path: |
+            ci-error.log
+            .ci-repair/*.sqlite*
+            .ci-repair/runs
+
+  resume:
+    if: always() && inputs.feedback_demo
+    needs: repair
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pytest==9.2.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: shipping-checkpoint
+          path: .
+      - name: Resume the same task
+        id: resume
+        uses: ./
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.API_KEY }}
+        with:
+          failed-sha: ${{ github.sha }}
+          log: ci-error.log
+          target-python: python
+          model: ${{ vars.CI_REPAIR_MODEL || 'deepseek:deepseek-flash' }}
+          regression: examples/shipping
+          budgets: '{"seconds":3600}'
+          seed-patch: evals/fixtures/shipping-regression.diff
+      - name: Verify checkpoint continuity
+        env:
+          REPORT: ${{ steps.resume.outputs.report }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = Path(os.environ['REPORT'])
+          r = json.loads(p.read_text())
+          records = [json.loads((p.parent / name).read_text()) for name in r['recovery']]
+          if not any(rec['completed_candidates'] == 1 and not rec['issue'] for rec in records):
+              raise SystemExit('Missing cross-runner resume evidence')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shipping-resumed
+          include-hidden-files: true
+          path: .ci-repair/runs/

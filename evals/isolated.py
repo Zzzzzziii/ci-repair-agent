@@ -1,5 +1,6 @@
 """Run benchmark pytest in a networkless container with a fresh evidence directory."""
 from pathlib import Path
+import os
 import subprocess
 from uuid import uuid4
 
@@ -23,6 +24,8 @@ def container_run(image, tree, evidence, args, stdout, stderr, timeout, reporter
                "--mount", f"type=bind,source={evidence.resolve()},target=/out",
                "-e", "PYTHONPATH=/subject:/subject/src", "-e", "PYTHONDONTWRITEBYTECODE=1",
                "-e", "LANGUAGE=en", "-e", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1"]
+    if os.name == "posix":
+        command.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
     if reporter:
         command.extend(["--mount", f"type=bind,source={reporter.resolve()},target=/pytest_reporter.py,readonly"])
     try:

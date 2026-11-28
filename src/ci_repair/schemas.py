@@ -119,6 +119,7 @@ ModelCallPurpose = Literal["initialize", "explore", "propose", "decision"]
 
 
 class ModelDecision(TypedDict):
+    problem: NotRequired[str]
     action: Literal["tool", "propose", "stop", "invalid"]
     name: str
     args: dict

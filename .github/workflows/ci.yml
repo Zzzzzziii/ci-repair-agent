@@ -18,5 +18,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install -e . "pytest>=8,<10"
+      - run: python -m pip wheel --no-deps -w dist .
+      - shell: pwsh
+        run: |
+          $wheel = (Get-ChildItem dist/ci_repair_agent-*.whl).FullName
+          python -m pip install $wheel "pytest>=8,<10"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ci-repair --help
       - run: python -m pytest -q

@@ -82,6 +82,7 @@ jobs:
             results/${{ matrix.case }}/**/calibration.json
             results/${{ matrix.case }}/**/evidence/*.xml
             results/${{ matrix.case }}/**/pytest.log
+            results/${{ matrix.case }}/**/stderr.log
             results/${{ matrix.case }}/**/runs/**
           if-no-files-found: error
 
