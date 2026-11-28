@@ -23,3 +23,7 @@
 | 上游空输入 | 被测提交 `e84d8ff` 的日志与报告 SHA 一致。模型读取源码后为 `interleave_evenly` 加入空输入处理，2 次模型调用、1 个候选，两个公开测试通过。下载同一份 `fix.diff` 后，阶段五 Docker 裁判重新运行公开目标、公开回归和隐藏用例，3/3 通过。[上游报告和补丁](https://github.com/Zzzzzziii/ci-repair-agent/actions/runs/45843627493/artifacts/15129502479) |
 | 运费第一轮 | 给定候选使普通地区满 200 元免运费，却让偏远地区同金额也免运费。Agent 记录失败的回归用例，拒绝补丁并暂停。[第一轮报告](https://github.com/Zzzzzziii/ci-repair-agent/actions/runs/45843627493/artifacts/15128672960) |
 | 运费恢复后 | 两台 runner 的任务 ID 均为 `139f7023-e72a-5866-a1ef-ae7ffbfce7e3`，被测 SHA 均为 `84f1c32`。新 runner 恢复时已有 1 个已验证候选。模型保留偏远地区优先收费的判断，把普通地区门槛从 `>` 改为 `>=`。第二个候选通过全部 4 个运费用例，任务共用 3 次模型调用。[恢复证据和最终补丁](https://github.com/Zzzzzziii/ci-repair-agent/actions/runs/45843627493/artifacts/15128648156) |
+
+## 从下游自己的 Actions 调用
+
+独立的私有运费仓库通过 `uses: Zzzzzziii/ci-repair-agent@84f1c32dc5881ef4c4b470051b475e26009e4b0d` 加载 Action。其测试作业先复现 1 项失败、3 项通过，再通过 `patch` 输入回放上表中的 DeepSeek 运费补丁。复核下载的产物时，原始测试日志与报告均指向下游自己的提交，4 项回归用例全部通过，输出的 `fix.diff` 与输入补丁逐字节一致。此次回放使用 0 次模型调用。实时生成补丁的调用记录见上表。
